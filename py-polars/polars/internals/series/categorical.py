@@ -24,10 +24,7 @@ class CatNameSpace:
         """Return if sorting uses the categories or the lexical order of the string values."""  # noqa: E501
         # see https://github.com/pola-rs/polars/pull/5705#issuecomment-1339131964
         # for a beautiful image and the reason for this branch.
-        if self._s is not None:
-            return self._s.cat_is_ordered()
-        else:
-            return None  # type: ignore[return-value]
+        return self._s.cat_is_ordered()
 
     def set_ordering(self, ordering: CategoricalOrdering) -> pli.Series:
         """
