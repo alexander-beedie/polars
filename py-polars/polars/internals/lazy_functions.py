@@ -1129,9 +1129,10 @@ def lit(
     tu: TimeUnit
     if isinstance(value, datetime):
         tu = "us" if dtype is None else getattr(dtype, "tu", "us")
-        e = lit(_datetime_to_pl_timestamp(value, tu)).cast(dtype or Datetime(tu))
-        if value.tzinfo is not None:
-            return e.dt.replace_time_zone(str(value.tzinfo))
+        tz = value.tzinfo if dtype is None else getattr(dtype, "tz", value.tzinfo)
+        e = lit(_datetime_to_pl_timestamp(value, tu)).cast(Datetime(tu))
+        if tz is not None:
+            return e.dt.replace_time_zone(str(tz))
         else:
             return e
 
