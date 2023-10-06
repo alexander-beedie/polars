@@ -5,6 +5,9 @@ use arrow::temporal_conversions::{
     timestamp_ms_to_datetime, timestamp_ns_to_datetime, timestamp_us_to_datetime,
 };
 use arrow::types::PrimitiveType;
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+#[cfg(feature = "dtype-struct")]
+use polars_arrow::trusted_len::TrustedLenPush;
 use polars_utils::format_smartstring;
 #[cfg(feature = "dtype-struct")]
 use polars_utils::slice::GetSaferUnchecked;
@@ -614,6 +617,17 @@ impl<'a> AnyValue<'a> {
             _ => {
                 polars_bail!(ComputeError: "cannot cast any-value '{:?}' to '{:?}'", self.dtype(), dtype)
             },
+            // #[cfg(feature = "dtype-date")]
+            // AnyValue::Utf8(v) => match dtype {
+            //     DataType::Date => {
+            //         let nd = NaiveDate::parse_from_str(v, "%Y-%m-%d").unwrap();
+            //         AnyValue::Date(naive_date_to_date(nd))
+            //     },
+            //     _ => polars_bail!(
+            //         ComputeError: format!("cannot cast 'str' any-value to dtype {dtype}")
+            //     ),
+            // },
+            _ => polars_bail!(ComputeError: "cannot cast non numeric any-value to numeric dtype"),
         };
         Ok(new_av)
     }
