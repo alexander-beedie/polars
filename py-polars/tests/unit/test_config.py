@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Dict
 
 import pytest
 
@@ -847,3 +847,92 @@ def test_unset_config_env_vars(
 
     with pl.Config(**{config_setting: None}):  # type: ignore[arg-type]
         assert environment_variable not in os.environ
+
+
+_CONFIG_REDIRECT_ = {
+    "set_ascii_tables": "???",
+    "set_auto_structify": "auto_structify",
+    "set_decimal_separator": "display.numeric.decimal_separator",
+    "set_float_precision": "display.numeric.float_precision",
+    "set_fmt_float": "display.numeric.float_format_type",
+    "set_fmt_str_lengths": "display.table.string_length",
+    "set_fmt_table_cell_list_len": "display.table.list_length",
+    "set_streaming_chunk_size": "streaming_chunk_size",
+    "set_tbl_cell_alignment": "display.table.align",
+    "set_tbl_cell_numeric_alignment": "display.numeric.align",
+    "set_tbl_cols": "display.table.max_cols",
+    "set_tbl_column_data_type_inline": "display.table.inline_dtype",
+    "set_tbl_dataframe_shape_below": "display.table.shape_below",
+    "set_tbl_formatting": "display.table.style",
+    "set_tbl_hide_column_data_types": "display.table.hide.column_dtype",
+    "set_tbl_hide_column_names": "display.table.hide.column_name",
+    "set_tbl_hide_dataframe_shape": "display.table.hide.shape",
+    "set_tbl_hide_dtype_separator": "display.table.hide.dtype_separator",
+    "set_tbl_rows": "display.table.max_rows",
+    "set_tbl_width_chars": "display.table.width",
+    "set_thousands_separator": "display.numeric.thousands_separator",
+    "set_trim_decimal_zeros": "display.numeric.trim_decimal_zeros",
+    "set_verbose": "verbose",
+}
+
+
+def test_new_config():
+    from functools import wraps
+
+    class ConfigNameSpace:
+        def __init__(self, name: str):
+            self._name = name
+
+        def __repr__(self):
+            # TODO: add config options
+            return self._name
+
+    def namespace(name):
+        def decorator(func):
+            @wraps(func)
+            def wrapped(*args, **kwargs):
+                return func(*args, **kwargs)
+
+            wrapped._namespace = name
+            return wrapped
+
+        return decorator
+
+    def _create_namespaces_(
+        class_name: str, parents: tuple[type], attrs: dict[str, Any]
+    ):
+        namespaced_attrs: dict[str, Any] = {}
+        base_attrs = {}
+        for name, attr in attrs.items():
+            if namespace := getattr(attr, "_namespace", None):
+                namespaced_attrs.setdefault(namespace, {})[name] = attr
+            else:
+                base_attrs[name] = attr
+
+        klass = type(class_name, parents, base_attrs)()
+        for namespace, methods in namespaced_attrs.items():
+            for part in namespace.split("."):
+                print(part)
+                config_namespace = getattr(klass, part, ConfigNameSpace)
+                for name, method in methods.items():
+                    setattr(config_namespace, name, method)
+                setattr(klass, namespace, config_namespace(namespace))
+        return klass
+
+    class Config(metaclass=_create_namespaces_):  # type: ignore[misc]
+        def __call__(self):
+            return self
+
+        @namespace("display")
+        def abc(self):
+            return "abc"
+
+        @namespace("display")
+        def xyz(self):
+            return "xyz"
+
+        def mno(self):
+            return "mno"
+
+    cfg = Config()
+    cfg.display.abc()
