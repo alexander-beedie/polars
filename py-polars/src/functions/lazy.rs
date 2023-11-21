@@ -204,19 +204,29 @@ pub fn arctan2d(y: PyExpr, x: PyExpr) -> PyExpr {
 }
 
 #[pyfunction]
-pub fn cum_fold(acc: PyExpr, lambda: PyObject, exprs: Vec<PyExpr>, include_init: bool) -> PyExpr {
+pub fn cum_fold(
+    acc: PyExpr,
+    lambda: PyObject,
+    exprs: Vec<PyExpr>,
+    include_init: bool,
+    field_type: Option<Wrap<DataType>>,
+) -> PyExpr {
     let exprs = exprs.to_exprs();
-
     let func = move |a: Series, b: Series| binary_lambda(&lambda, a, b);
-    dsl::cum_fold_exprs(acc.inner, func, exprs, include_init).into()
+    let field_type = field_type.map(|dt| dt.0);
+    dsl::cum_fold_exprs(acc.inner, func, exprs, include_init, field_type).into()
 }
 
 #[pyfunction]
-pub fn cum_reduce(lambda: PyObject, exprs: Vec<PyExpr>) -> PyExpr {
+pub fn cum_reduce(
+    lambda: PyObject,
+    exprs: Vec<PyExpr>,
+    field_type: Option<Wrap<DataType>>,
+) -> PyExpr {
     let exprs = exprs.to_exprs();
-
     let func = move |a: Series, b: Series| binary_lambda(&lambda, a, b);
-    dsl::cum_reduce_exprs(func, exprs).into()
+    let field_type = field_type.map(|dt| dt.0);
+    dsl::cum_reduce_exprs(func, exprs, field_type).into()
 }
 
 #[pyfunction]
@@ -360,11 +370,16 @@ pub fn first() -> PyExpr {
 }
 
 #[pyfunction]
-pub fn fold(acc: PyExpr, lambda: PyObject, exprs: Vec<PyExpr>) -> PyExpr {
+pub fn fold(
+    acc: PyExpr,
+    lambda: PyObject,
+    exprs: Vec<PyExpr>,
+    output_type: Option<Wrap<DataType>>,
+) -> PyExpr {
     let exprs = exprs.to_exprs();
-
     let func = move |a: Series, b: Series| binary_lambda(&lambda, a, b);
-    dsl::fold_exprs(acc.inner, func, exprs).into()
+    let output_type = output_type.map(|dt| dt.0);
+    dsl::fold_exprs(acc.inner, func, exprs, output_type).into()
 }
 
 #[pyfunction]
@@ -434,11 +449,11 @@ pub fn pearson_corr(a: PyExpr, b: PyExpr, ddof: u8) -> PyExpr {
 }
 
 #[pyfunction]
-pub fn reduce(lambda: PyObject, exprs: Vec<PyExpr>) -> PyExpr {
+pub fn reduce(lambda: PyObject, exprs: Vec<PyExpr>, output_type: Option<Wrap<DataType>>) -> PyExpr {
     let exprs = exprs.to_exprs();
-
     let func = move |a: Series, b: Series| binary_lambda(&lambda, a, b);
-    dsl::reduce_exprs(func, exprs).into()
+    let output_type = output_type.map(|dt| dt.0);
+    dsl::reduce_exprs(func, exprs, output_type).into()
 }
 
 #[pyfunction]
@@ -449,7 +464,6 @@ pub fn repeat(value: PyExpr, n: PyExpr, dtype: Option<Wrap<DataType>>) -> PyResu
     if let Some(dtype) = dtype {
         value = value.cast(dtype.0);
     }
-
     if let Expr::Literal(lv) = &value {
         let av = lv.to_any_value().unwrap();
         // Integer inputs that fit in Int32 are parsed as such

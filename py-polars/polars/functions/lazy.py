@@ -16,12 +16,12 @@ from polars._utils.parse_expr_input import (
     parse_as_list_of_expressions,
 )
 from polars._utils.unstable import issue_unstable_warning, unstable
+from polars._utils.various import infer_function_return_dtype
 from polars._utils.wrap import wrap_df, wrap_expr
 from polars.datatypes import DTYPE_TEMPORAL_UNITS, Date, Datetime, Int64, UInt32
 
 with contextlib.suppress(ImportError):  # Module not available when building docs
     import polars.polars as plr
-
 
 if TYPE_CHECKING:
     from typing import Awaitable, Collection, Literal
@@ -869,7 +869,7 @@ def map_batches(
     function
         Function to apply over the input.
     return_dtype
-        dtype of the output Series.
+        Output dtype for the resulting Series; if omitted this will be inferred.
 
     Returns
     -------
@@ -933,7 +933,7 @@ def map(
     function
         Function to apply over the input
     return_dtype
-        dtype of the output Series
+        Output dtype for the resulting Series; if omitted this will be inferred.
 
     Returns
     -------
@@ -964,7 +964,7 @@ def map_groups(
     function
         Function to apply over the input; should be of type Callable[[Series], Series].
     return_dtype
-        dtype of the output Series.
+        Output dtype for the resulting Series; if omitted this will be inferred..
     returns_scalar
         If the function returns a single scalar as output.
 
@@ -1052,7 +1052,7 @@ def apply(
     function
         Function to apply over the input
     return_dtype
-        dtype of the output Series
+        Output dtype for the resulting Series; if omitted this will be inferred.
     returns_scalar
         If the function returns a single scalar as output.
 
@@ -1068,6 +1068,7 @@ def fold(
     acc: IntoExpr,
     function: Callable[[Series, Series], Series],
     exprs: Sequence[Expr | str] | Expr,
+    return_dtype: PolarsDataType | None = None,
 ) -> Expr:
     """
     Accumulate over multiple columns horizontally/ row wise with a left fold.
@@ -1081,7 +1082,9 @@ def fold(
         Function to apply over the accumulator and the value.
         Fn(acc, value) -> new_value
     exprs
-        Expressions to aggregate over. May also be a wildcard expression.
+        Expressions to aggregate over; may also be a wildcard expression.
+    return_dtype
+        Output dtype for the resulting Series; if omitted this will be inferred.
 
     Notes
     -----
@@ -1169,15 +1172,18 @@ def fold(
         exprs = [exprs]
 
     exprs = parse_as_list_of_expressions(exprs)
-    return wrap_expr(plr.fold(acc, function, exprs))
+    if return_dtype is None:
+        return_dtype = infer_function_return_dtype(function)
+    return wrap_expr(plr.fold(acc, function, exprs, return_dtype))
 
 
 def reduce(
     function: Callable[[Series, Series], Series],
     exprs: Sequence[Expr | str] | Expr,
+    return_dtype: PolarsDataType | None = None,
 ) -> Expr:
     """
-    Accumulate over multiple columns horizontally/ row wise with a left fold.
+    Accumulate over multiple columns horizontally (row-wise) with a left fold.
 
     Parameters
     ----------
@@ -1185,7 +1191,9 @@ def reduce(
         Function to apply over the accumulator and the value.
         Fn(acc, value) -> new_value
     exprs
-        Expressions to aggregate over. May also be a wildcard expression.
+        Expressions to aggregate over; may also be a wildcard expression.
+    return_dtype
+        Output dtype for the resulting Series; if omitted this will be inferred.
 
     Notes
     -----
@@ -1232,13 +1240,16 @@ def reduce(
         exprs = [exprs]
 
     exprs = parse_as_list_of_expressions(exprs)
-    return wrap_expr(plr.reduce(function, exprs))
+    if return_dtype is None:
+        return_dtype = infer_function_return_dtype(function)
+    return wrap_expr(plr.reduce(function, exprs, return_dtype))
 
 
 def cum_fold(
     acc: IntoExpr,
     function: Callable[[Series, Series], Series],
     exprs: Sequence[Expr | str] | Expr,
+    return_field_dtype: PolarsDataType | None = None,
     *,
     include_init: bool = False,
 ) -> Expr:
@@ -1257,6 +1268,9 @@ def cum_fold(
         Fn(acc, value) -> new_value
     exprs
         Expressions to aggregate over. May also be a wildcard expression.
+    return_field_dtype
+        Output dtype for the resulting Struct field dtypes; if omitted this will be
+        inferred.
     include_init
         Include the initial accumulator state as struct field.
 
@@ -1294,12 +1308,19 @@ def cum_fold(
         exprs = [exprs]
 
     exprs = parse_as_list_of_expressions(exprs)
-    return wrap_expr(plr.cum_fold(acc, function, exprs, include_init).alias("cum_fold"))
+    if return_field_dtype is None:
+        return_field_dtype = infer_function_return_dtype(function)
+    return wrap_expr(
+        plr.cum_fold(acc, function, exprs, include_init, return_field_dtype).alias(
+            "cum_fold"
+        )
+    )
 
 
 def cum_reduce(
     function: Callable[[Series, Series], Series],
     exprs: Sequence[Expr | str] | Expr,
+    return_field_dtype: PolarsDataType | None = None,
 ) -> Expr:
     """
     Cumulatively reduce horizontally across columns with a left fold.
@@ -1313,6 +1334,9 @@ def cum_reduce(
         Fn(acc, value) -> new_value
     exprs
         Expressions to aggregate over. May also be a wildcard expression.
+    return_field_dtype
+        Output dtype for the resulting Struct field dtypes; if omitted this will be
+        inferred.
 
     Examples
     --------
@@ -1340,7 +1364,11 @@ def cum_reduce(
         exprs = [exprs]
 
     exprs = parse_as_list_of_expressions(exprs)
-    return wrap_expr(plr.cum_reduce(function, exprs).alias("cum_reduce"))
+    if return_field_dtype is None:
+        return_field_dtype = infer_function_return_dtype(function)
+    return wrap_expr(
+        plr.cum_reduce(function, exprs, return_field_dtype).alias("cum_reduce")
+    )
 
 
 def arctan2(y: str | Expr, x: str | Expr) -> Expr:
@@ -2206,6 +2234,7 @@ def cumfold(
     acc: IntoExpr,
     function: Callable[[Series, Series], Series],
     exprs: Sequence[Expr | str] | Expr,
+    return_dtype: PolarsDataType | None = None,
     *,
     include_init: bool = False,
 ) -> Expr:
@@ -2224,8 +2253,11 @@ def cumfold(
         Fn(acc, value) -> new_value
     exprs
         Expressions to aggregate over. May also be a wildcard expression.
+    return_dtype
+        Output dtype for the resulting Series; if omitted this will be inferred.
     include_init
         Include the initial accumulator state as struct field.
+
     """  # noqa: W505
     # in case of col("*")
     acc = parse_as_expression(acc, str_as_lit=True)
@@ -2233,13 +2265,14 @@ def cumfold(
         exprs = [exprs]
 
     exprs = parse_as_list_of_expressions(exprs)
-    return wrap_expr(plr.cum_fold(acc, function, exprs, include_init))
+    return wrap_expr(plr.cum_fold(acc, function, exprs, include_init, return_dtype))
 
 
 @deprecate_renamed_function("cum_reduce", version="0.19.14")
 def cumreduce(
     function: Callable[[Series, Series], Series],
     exprs: Sequence[Expr | str] | Expr,
+    return_dtype: PolarsDataType | None = None,
 ) -> Expr:
     """
     Cumulatively accumulate over multiple columns horizontally/ row wise with a left fold.
@@ -2253,10 +2286,13 @@ def cumreduce(
         Fn(acc, value) -> new_value
     exprs
         Expressions to aggregate over. May also be a wildcard expression.
+    return_dtype
+        Output dtype for the resulting Series; if omitted this will be inferred.
+
     """  # noqa: W505
     # in case of col("*")
     if isinstance(exprs, pl.Expr):
         exprs = [exprs]
 
     exprs = parse_as_list_of_expressions(exprs)
-    return wrap_expr(plr.cum_reduce(function, exprs))
+    return wrap_expr(plr.cum_reduce(function, exprs, return_dtype))

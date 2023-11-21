@@ -401,9 +401,11 @@ def py_type_to_dtype(
     elif isinstance(data_type, (OptionType, UnionType)):
         # not exhaustive; handles the common "type | None" case, but
         # should probably pick appropriate supertype when n_types > 1?
-        possible_types = [tp for tp in get_args(data_type) if tp is not NoneType]
+        possible_types = {tp for tp in get_args(data_type) if tp is not NoneType}
         if len(possible_types) == 1:
-            data_type = possible_types[0]
+            data_type = possible_types.pop()
+        elif possible_types == {int, float}:
+            data_type = float
 
     elif allow_strings and isinstance(data_type, str):
         data_type = DataTypeMappings.REPR_TO_DTYPE.get(

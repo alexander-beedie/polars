@@ -13,7 +13,7 @@ import pytest
 from pydantic import BaseModel, Field, TypeAdapter
 
 import polars as pl
-from polars._utils.construction import type_hints
+from polars._utils.various import type_hints
 from polars.datatypes import PolarsDataType, numpy_char_code_to_dtype
 from polars.dependencies import dataclasses, pydantic
 from polars.exceptions import TimeZoneAwareConstructorWarning
@@ -796,45 +796,6 @@ def test_init_series() -> None:
     assert_series_equal(s5, pl.Series("", [1, 2, 3], dtype=pl.Int8))
 
 
-@pytest.mark.parametrize(
-    ("dtype", "expected_dtype"),
-    [
-        (int, pl.Int64),
-        (bytes, pl.Binary),
-        (float, pl.Float64),
-        (str, pl.String),
-        (date, pl.Date),
-        (time, pl.Time),
-        (datetime, pl.Datetime("us")),
-        (timedelta, pl.Duration("us")),
-        (Decimal, pl.Decimal(precision=None, scale=0)),
-    ],
-)
-def test_init_py_dtype(dtype: Any, expected_dtype: PolarsDataType) -> None:
-    for s in (
-        pl.Series("s", [None], dtype=dtype),
-        pl.Series("s", [], dtype=dtype),
-    ):
-        assert s.dtype == expected_dtype
-
-    for df in (
-        pl.DataFrame({"col": [None]}, schema={"col": dtype}),
-        pl.DataFrame({"col": []}, schema={"col": dtype}),
-    ):
-        assert df.schema == {"col": expected_dtype}
-
-
-def test_init_py_dtype_misc_float() -> None:
-    assert pl.Series([100], dtype=float).dtype == pl.Float64  # type: ignore[arg-type]
-
-    df = pl.DataFrame(
-        {"x": [100.0], "y": [200], "z": [None]},
-        schema={"x": float, "y": float, "z": float},
-    )
-    assert df.schema == {"x": pl.Float64, "y": pl.Float64, "z": pl.Float64}
-    assert df.rows() == [(100.0, 200.0, None)]
-
-
 def test_init_seq_of_seq() -> None:
     # List of lists
     df = pl.DataFrame([[1, 2, 3], [4, 5, 6]], schema=["a", "b", "c"])
@@ -1498,6 +1459,45 @@ def test_datetime_date_subclasses() -> None:
     result = pl.Series([FakeDate(2020, 1, 1)])
     expected = pl.Series([date(2020, 1, 1)])
     assert_series_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    ("dtype", "expected_dtype"),
+    [
+        (int, pl.Int64),
+        (bytes, pl.Binary),
+        (float, pl.Float64),
+        (str, pl.String),
+        (date, pl.Date),
+        (time, pl.Time),
+        (datetime, pl.Datetime("us")),
+        (timedelta, pl.Duration("us")),
+        (Decimal, pl.Decimal(precision=None, scale=0)),
+    ],
+)
+def test_init_py_dtype(dtype: Any, expected_dtype: PolarsDataType) -> None:
+    for s in (
+        pl.Series("s", [None], dtype=dtype),
+        pl.Series("s", [], dtype=dtype),
+    ):
+        assert s.dtype == expected_dtype
+
+    for df in (
+        pl.DataFrame({"col": [None]}, schema={"col": dtype}),
+        pl.DataFrame({"col": []}, schema={"col": dtype}),
+    ):
+        assert df.schema == {"col": expected_dtype}
+
+
+def test_init_py_dtype_misc_float() -> None:
+    assert pl.Series([100], dtype=float).dtype == pl.Float64  # type: ignore[arg-type]
+
+    df = pl.DataFrame(
+        {"x": [100.0], "y": [200], "z": [None]},
+        schema={"x": float, "y": float, "z": float},
+    )
+    assert df.schema == {"x": pl.Float64, "y": pl.Float64, "z": pl.Float64}
+    assert df.rows() == [(100.0, 200.0, None)]
 
 
 def test_list_null_constructor() -> None:

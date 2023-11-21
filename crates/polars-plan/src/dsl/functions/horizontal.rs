@@ -1,18 +1,24 @@
 use super::*;
 
 #[cfg(feature = "dtype-struct")]
-fn cum_fold_dtype() -> GetOutput {
-    GetOutput::map_fields(|fields| {
-        let mut st = fields[0].dtype.clone();
-        for fld in &fields[1..] {
-            st = get_supertype(&st, &fld.dtype).unwrap();
-        }
+fn cum_fold_dtype(field_dtype: Option<DataType>) -> GetOutput {
+    GetOutput::map_fields(move |fields| {
+        let field_dtype = match &field_dtype {
+            Some(dt) => dt.clone(),
+            None => {
+                let mut st = fields[0].dtype.clone();
+                for fld in &fields[1..] {
+                    st = get_supertype(&st, &fld.dtype).unwrap();
+                }
+                st
+            },
+        };
         Field::new(
             &fields[0].name,
             DataType::Struct(
                 fields
                     .iter()
-                    .map(|fld| Field::new(fld.name(), st.clone()))
+                    .map(|fld| Field::new(fld.name(), field_dtype.clone()))
                     .collect(),
             ),
         )
@@ -20,7 +26,12 @@ fn cum_fold_dtype() -> GetOutput {
 }
 
 /// Accumulate over multiple columns horizontally / row wise.
-pub fn fold_exprs<F: 'static, E: AsRef<[Expr]>>(acc: Expr, f: F, exprs: E) -> Expr
+pub fn fold_exprs<F: 'static, E: AsRef<[Expr]>>(
+    acc: Expr,
+    f: F,
+    exprs: E,
+    output_type: Option<DataType>,
+) -> Expr
 where
     F: Fn(Series, Series) -> PolarsResult<Option<Series>> + Send + Sync + Clone,
 {
@@ -42,7 +53,10 @@ where
     Expr::AnonymousFunction {
         input: exprs,
         function,
-        output_type: GetOutput::super_type(),
+        output_type: match output_type {
+            Some(dt) => GetOutput::from_type(dt),
+            None => GetOutput::super_type(),
+        },
         options: FunctionOptions {
             collect_groups: ApplyOptions::GroupWise,
             input_wildcard_expansion: true,
@@ -58,19 +72,21 @@ where
 /// An accumulator is initialized to the series given by the first expression in `exprs`, and then each subsequent value
 /// of the accumulator is computed from `f(acc, next_expr_series)`. If `exprs` is empty, an error is returned when
 /// `collect` is called.
-pub fn reduce_exprs<F: 'static, E: AsRef<[Expr]>>(f: F, exprs: E) -> Expr
+pub fn reduce_exprs<F: 'static, E: AsRef<[Expr]>>(
+    f: F,
+    exprs: E,
+    output_type: Option<DataType>,
+) -> Expr
 where
     F: Fn(Series, Series) -> PolarsResult<Option<Series>> + Send + Sync + Clone,
 {
     let exprs = exprs.as_ref().to_vec();
-
     let function = SpecialEq::new(Arc::new(move |series: &mut [Series]| {
         let mut s_iter = series.iter();
 
         match s_iter.next() {
             Some(acc) => {
                 let mut acc = acc.clone();
-
                 for s in s_iter {
                     if let Some(a) = f(acc.clone(), s.clone())? {
                         acc = a
@@ -85,7 +101,10 @@ where
     Expr::AnonymousFunction {
         input: exprs,
         function,
-        output_type: GetOutput::super_type(),
+        output_type: match output_type {
+            Some(dt) => GetOutput::from_type(dt),
+            None => GetOutput::super_type(),
+        },
         options: FunctionOptions {
             collect_groups: ApplyOptions::GroupWise,
             input_wildcard_expansion: true,
@@ -98,12 +117,15 @@ where
 
 /// Accumulate over multiple columns horizontally / row wise.
 #[cfg(feature = "dtype-struct")]
-pub fn cum_reduce_exprs<F: 'static, E: AsRef<[Expr]>>(f: F, exprs: E) -> Expr
+pub fn cum_reduce_exprs<F: 'static, E: AsRef<[Expr]>>(
+    f: F,
+    exprs: E,
+    field_type: Option<DataType>,
+) -> Expr
 where
     F: Fn(Series, Series) -> PolarsResult<Option<Series>> + Send + Sync + Clone,
 {
     let exprs = exprs.as_ref().to_vec();
-
     let function = SpecialEq::new(Arc::new(move |series: &mut [Series]| {
         let mut s_iter = series.iter();
 
@@ -130,7 +152,7 @@ where
     Expr::AnonymousFunction {
         input: exprs,
         function,
-        output_type: cum_fold_dtype(),
+        output_type: cum_fold_dtype(field_type),
         options: FunctionOptions {
             collect_groups: ApplyOptions::GroupWise,
             input_wildcard_expansion: true,
@@ -148,6 +170,7 @@ pub fn cum_fold_exprs<F: 'static, E: AsRef<[Expr]>>(
     f: F,
     exprs: E,
     include_init: bool,
+    field_type: Option<DataType>,
 ) -> Expr
 where
     F: Fn(Series, Series) -> PolarsResult<Option<Series>> + Send + Sync + Clone,
@@ -179,7 +202,7 @@ where
     Expr::AnonymousFunction {
         input: exprs,
         function,
-        output_type: cum_fold_dtype(),
+        output_type: cum_fold_dtype(field_type),
         options: FunctionOptions {
             collect_groups: ApplyOptions::GroupWise,
             input_wildcard_expansion: true,

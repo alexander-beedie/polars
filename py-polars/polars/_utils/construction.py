@@ -7,7 +7,6 @@ from decimal import Decimal as PyDecimal
 from functools import lru_cache, singledispatch
 from itertools import islice, zip_longest
 from operator import itemgetter
-from sys import version_info
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -18,7 +17,6 @@ from typing import (
     Mapping,
     MutableMapping,
     Sequence,
-    get_type_hints,
 )
 
 import polars._reexport as pl
@@ -29,6 +27,7 @@ from polars._utils.various import (
     find_stacklevel,
     parse_version,
     range_to_series,
+    type_hints,
 )
 from polars._utils.wrap import wrap_df, wrap_s
 from polars.datatypes import (
@@ -90,26 +89,6 @@ if TYPE_CHECKING:
         SchemaDefinition,
         SchemaDict,
     )
-
-
-def _get_annotations(obj: type) -> dict[str, Any]:
-    return getattr(obj, "__annotations__", {})
-
-
-if version_info >= (3, 10):
-
-    def type_hints(obj: type) -> dict[str, Any]:
-        try:
-            # often the same as obj.__annotations__, but handles forward references
-            # encoded as string literals, adds Optional[t] if a default value equal
-            # to None is set and recursively replaces 'Annotated[T, ...]' with 'T'.
-            return get_type_hints(obj)
-        except TypeError:
-            # fallback on edge-cases (eg: InitVar inference on python 3.10).
-            return _get_annotations(obj)
-
-else:
-    type_hints = _get_annotations
 
 
 @lru_cache(64)

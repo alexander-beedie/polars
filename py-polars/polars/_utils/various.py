@@ -8,7 +8,17 @@ import warnings
 from collections.abc import MappingView, Sized
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Generator, Iterable, Literal, Sequence, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Generator,
+    Iterable,
+    Literal,
+    Sequence,
+    TypeVar,
+    get_type_hints,
+)
 
 import polars as pl
 from polars import functions as F
@@ -23,6 +33,8 @@ from polars.datatypes import (
     Int64,
     String,
     Time,
+    numpy_char_code_to_dtype,
+    py_type_to_dtype,
 )
 from polars.dependencies import _check_for_numpy
 from polars.dependencies import numpy as np
@@ -570,3 +582,49 @@ def re_escape(s: str) -> str:
     # escapes _only_ those metachars with meaning to the rust regex crate
     re_rust_metachars = r"\\?()|\[\]{}^$#&~.+*-"
     return re.sub(f"([{re_rust_metachars}])", r"\\\1", s)
+
+
+def _get_annotations(obj: Any) -> dict[str, Any]:
+    return getattr(obj, "__annotations__", {})
+
+
+if sys.version_info >= (3, 10):
+
+    def type_hints(obj: Any) -> dict[str, Any]:
+        """Return typing annotations for the given object."""
+        try:
+            # often the same as obj.__annotations__, but handles forward references
+            # encoded as string literals, adds Optional[t] if a default value equal
+            # to None is set and recursively replaces 'Annotated[T, ...]' with 'T'.
+            return get_type_hints(obj)
+        except TypeError:
+            # fallback on edge-cases (eg: InitVar inference on python 3.10).
+            return _get_annotations(obj)
+
+else:
+    type_hints = _get_annotations
+
+
+def infer_function_return_dtype(function: Callable[..., Any]) -> PolarsDataType | None:
+    """Infer the return dtype of a function; returns None if unable to determine."""
+    return_dtype = None
+    if _check_for_numpy(function):
+        if (otypes := getattr(function, "otypes", None)) is not None:
+            if isinstance(otypes, Sequence) and len(otypes) == 1:
+                otypes = otypes[0]
+            if isinstance(otypes, str):
+                return_dtype = numpy_char_code_to_dtype(otypes)
+
+    elif (return_type := type_hints(function).get("return", None)) is not None:
+        if isinstance(return_type, type) and _check_for_numpy(
+            return_type, check_type=False
+        ):
+            if issubclass(return_type, np.generic):
+                return_dtype = numpy_char_code_to_dtype(np.dtype(return_type).char)
+
+        elif _check_for_numpy(return_type) and isinstance(return_type, np.dtype):
+            return_dtype = numpy_char_code_to_dtype(np.dtype(return_type).char)
+        else:
+            return_dtype = py_type_to_dtype(return_type, raise_unmatched=False)
+
+    return return_dtype

@@ -18,25 +18,38 @@ def test_fold_reduce() -> None:
 
 
 def test_cum_fold() -> None:
-    df = pl.DataFrame(
+    lf = pl.LazyFrame(
         {
             "a": [1, 2, 3, 4],
             "b": [5, 6, 7, 8],
             "c": [10, 20, 30, 40],
         }
     )
-    result = df.select(pl.cum_fold(pl.lit(0), lambda a, b: a + b, pl.all()))
+    result = lf.select(
+        pl.cum_fold(pl.lit(0), lambda a, b: a + b, pl.all(), return_field_dtype=pl.Int8)
+    )
+    expected_schema = {
+        "cum_fold": pl.Struct(
+            [
+                pl.Field("a", pl.Int8),
+                pl.Field("b", pl.Int8),
+                pl.Field("c", pl.Int8),
+            ]
+        )
+    }
     expected = pl.DataFrame(
-        {
+        data={
             "cum_fold": [
                 {"a": 1, "b": 6, "c": 16},
                 {"a": 2, "b": 8, "c": 28},
                 {"a": 3, "b": 10, "c": 40},
                 {"a": 4, "b": 12, "c": 52},
             ]
-        }
+        },
+        schema=expected_schema,
     )
-    assert_frame_equal(result, expected)
+    assert expected_schema == result.schema
+    assert_frame_equal(result.collect(), expected)
 
 
 def test_cum_reduce() -> None:
