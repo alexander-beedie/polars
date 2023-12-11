@@ -163,6 +163,13 @@ impl DateLikeNameSpace {
             .map_private(FunctionExpr::TemporalExpr(TemporalFunction::Nanosecond))
     }
 
+    /// Get the Date/Datetime as a Julian date
+    pub fn julian_date(self) -> Expr {
+        self.0
+            .map_private(FunctionExpr::TemporalExpr(TemporalFunction::JulianDate))
+    }
+
+    /// Get the Date/Datetime as a Unix timestamp (epoch)
     pub fn timestamp(self, tu: TimeUnit) -> Expr {
         self.0
             .map_private(FunctionExpr::TemporalExpr(TemporalFunction::TimeStamp(tu)))
@@ -177,28 +184,28 @@ impl DateLikeNameSpace {
         )
     }
 
-    // roll backward to the first day of the month
+    /// Roll backward to the first day of the month
     #[cfg(feature = "date_offset")]
     pub fn month_start(self) -> Expr {
         self.0
             .map_private(FunctionExpr::TemporalExpr(TemporalFunction::MonthStart))
     }
 
-    // roll forward to the last day of the month
+    /// Roll forward to the last day of the month
     #[cfg(feature = "date_offset")]
     pub fn month_end(self) -> Expr {
         self.0
             .map_private(FunctionExpr::TemporalExpr(TemporalFunction::MonthEnd))
     }
 
-    // Get the base offset from UTC
+    /// Get the base offset from UTC
     #[cfg(feature = "timezones")]
     pub fn base_utc_offset(self) -> Expr {
         self.0
             .map_private(FunctionExpr::TemporalExpr(TemporalFunction::BaseUtcOffset))
     }
 
-    // Get the additional offset from UTC currently in effect (usually due to daylight saving time)
+    /// Get the additional offset from UTC currently in effect (usually due to daylight saving time)
     #[cfg(feature = "timezones")]
     pub fn dst_offset(self) -> Expr {
         self.0
@@ -215,7 +222,7 @@ impl DateLikeNameSpace {
     }
 
     /// Offset this `Date/Datetime` by a given offset [`Duration`].
-    /// This will take leap years/ months into account.
+    /// This will take leap years/months into account.
     #[cfg(feature = "date_offset")]
     pub fn offset_by(self, by: Expr) -> Expr {
         self.0

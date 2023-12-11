@@ -56,7 +56,7 @@ def datetime_(
         Column or literal, ranging from 0-59.
     microsecond
         Column or literal, ranging from 0-999999.
-    time_unit : {'us', 'ms', 'ns'}
+    time_unit : {'ns', 'us', 'ms'}
         Time unit of the resulting expression.
     time_zone
         Time zone of the resulting expression.
@@ -208,7 +208,7 @@ def duration(
         Number of microseconds.
     nanoseconds
         Number of nanoseconds.
-    time_unit : {'us', 'ms', 'ns'}
+    time_unit : {'ns', 'us', 'ms'}
         Time unit of the resulting expression.
 
     Returns

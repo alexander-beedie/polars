@@ -27,6 +27,10 @@ impl PyExpr {
             .into()
     }
 
+    fn dt_julian_date(&self) -> Self {
+        self.inner.clone().dt().julian_date().into()
+    }
+
     fn dt_with_time_unit(&self, time_unit: Wrap<TimeUnit>) -> Self {
         self.inner.clone().dt().with_time_unit(time_unit.0).into()
     }

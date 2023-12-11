@@ -21,6 +21,7 @@ impl From<TemporalFunction> for SpecialEq<Arc<dyn SeriesUdf>> {
             WeekDay => map!(datetime::weekday),
             Day => map!(datetime::day),
             OrdinalDay => map!(datetime::ordinal_day),
+            JulianDate => map!(datetime::julian_date),
             Time => map!(datetime::time),
             Date => map!(datetime::date),
             Datetime => map!(datetime::datetime),

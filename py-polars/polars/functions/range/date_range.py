@@ -90,7 +90,7 @@ def date_range(
         or using the Polars duration string language (see "Notes" section below).
     closed : {'both', 'left', 'right', 'none'}
         Define which sides of the range are closed (inclusive).
-    time_unit : {None, 'ns', 'us', 'ms'}
+    time_unit : {'ns', 'us', 'ms', None}
         Time unit of the resulting `Datetime` data type.
         Only takes effect if the output column is of type `Datetime`.
     time_zone
@@ -256,7 +256,7 @@ def date_ranges(
         or using the Polars duration string language (see "Notes" section below).
     closed : {'both', 'left', 'right', 'none'}
         Define which sides of the range are closed (inclusive).
-    time_unit : {None, 'ns', 'us', 'ms'}
+    time_unit : {'ns', 'us', 'ms', None}
         Time unit of the resulting `Datetime` data type.
         Only takes effect if the output column is of type `Datetime`.
     time_zone

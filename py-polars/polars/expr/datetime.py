@@ -1153,6 +1153,49 @@ class ExprDateTimeNameSpace:
                 f"`time_unit` must be one of {{'ns', 'us', 'ms', 's', 'd'}}, got {time_unit!r}"
             )
 
+    def julian_date(self) -> Expr:
+        """
+        Return the underlying Date/Datetime value as a Julian float.
+
+        Examples
+        --------
+        >>> from datetime import date, datetime
+        >>> df = pl.DataFrame(
+        ...     {
+        ...         "dt": [
+        ...             date(2010, 7, 7),
+        ...             date(1999, 12, 31),
+        ...             date(2031, 2, 14),
+        ...         ],
+        ...         "dtm": [
+        ...             datetime(1989, 1, 1, 10, 20, 30),
+        ...             datetime(2021, 8, 7, 15, 55, 45),
+        ...             datetime(2077, 4, 5, 22, 17, 10),
+        ...         ],
+        ...     }
+        ... )
+
+        >>> with pl.Config(float_precision=6):
+        ...     print(
+        ...         df.with_columns(
+        ...             dt_julian=pl.col("dt").dt.julian_date(),
+        ...             dtm_julian=pl.col("dtm").dt.julian_date(),
+        ...         )
+        ...     )
+        ...
+        shape: (3, 4)
+        ┌────────────┬─────────────────────┬────────────────┬────────────────┐
+        │ dt         ┆ dtm                 ┆ dt_julian      ┆ dtm_julian     │
+        │ ---        ┆ ---                 ┆ ---            ┆ ---            │
+        │ date       ┆ datetime[μs]        ┆ f64            ┆ f64            │
+        ╞════════════╪═════════════════════╪════════════════╪════════════════╡
+        │ 2010-07-07 ┆ 1989-01-01 10:20:30 ┆ 2455384.500000 ┆ 2447527.930903 │
+        │ 1999-12-31 ┆ 2021-08-07 15:55:45 ┆ 2451543.500000 ┆ 2459434.163715 │
+        │ 2031-02-14 ┆ 2077-04-05 22:17:10 ┆ 2462911.500000 ┆ 2479764.428588 │
+        └────────────┴─────────────────────┴────────────────┴────────────────┘
+        """
+        return wrap_expr(self._pyexpr.dt_julian_date())
+
     def timestamp(self, time_unit: TimeUnit = "us") -> Expr:
         """
         Return a timestamp in the given time unit.

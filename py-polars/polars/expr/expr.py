@@ -3994,7 +3994,7 @@ class Expr:
         Notes
         -----
         If you are looking to map a function over a window function or group_by context,
-        refer to func:`map_elements` instead.
+        refer to :func:`map_elements` instead.
 
         Warnings
         --------

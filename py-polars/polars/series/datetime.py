@@ -812,7 +812,7 @@ class DateTimeNameSpace:
 
         Parameters
         ----------
-        time_unit : {'us', 'ns', 'ms'}
+        time_unit : {'ns', 'us', 'ms'}
             Time unit.
 
         Examples
@@ -854,7 +854,7 @@ class DateTimeNameSpace:
 
         Parameters
         ----------
-        time_unit : {'us', 'ns', 'ms', 's', 'd'}
+        time_unit : {'ns', 'us', 'ms', 's', 'd'}
             Unit of time.
 
         Examples

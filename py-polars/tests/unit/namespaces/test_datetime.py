@@ -529,21 +529,68 @@ def test_cast_time_units(
     date_in_that_unit: list[int],
 ) -> None:
     dates = pl.Series([datetime(2001, 1, 1), datetime(2001, 2, 1, 10, 8, 9)])
-
     assert dates.dt.cast_time_unit(time_unit).cast(int).to_list() == date_in_that_unit
 
 
 def test_epoch_matches_timestamp() -> None:
-    dates = pl.Series([datetime(2001, 1, 1), datetime(2001, 2, 1, 10, 8, 9)])
+    dates = pl.Series([datetime(1999, 12, 31), datetime(2021, 2, 1, 10, 8, 9)])
+    expected_ns = pl.Series([946598400000000000, 1612174089000000000])
+    scale_tu = {"ns": 1, "us": 1000, "ms": 1000000}
 
     for unit in DTYPE_TEMPORAL_UNITS:
-        assert_series_equal(dates.dt.epoch(unit), dates.dt.timestamp(unit))
+        epoch = dates.dt.epoch(unit)
+        assert_series_equal(epoch, dates.dt.timestamp(unit))
+        assert_series_equal(expected_ns, epoch.to_physical() * scale_tu[unit])
 
     assert_series_equal(dates.dt.epoch("s"), dates.dt.timestamp("ms") // 1000)
     assert_series_equal(
         dates.dt.epoch("d"),
         (dates.dt.timestamp("ms") // (1000 * 3600 * 24)).cast(pl.Int32),
     )
+
+
+@pytest.mark.parametrize("time_unit", ["ms", "us", "ns"])
+def test_julian_date(time_unit: TimeUnit) -> None:
+    df = pl.DataFrame(
+        {
+            "dt": [date(1899, 12, 31), date(2000, 1, 1), date(2042, 7, 5)],
+            "dtm": [
+                datetime(2084, 4, 4, 10, 30, 45, 808000),
+                datetime(1950, 4, 3, 1, 20, 10, 123000),
+                datetime(2010, 10, 10, 23, 59, 59, 500000),
+            ],
+        },
+    ).with_columns(
+        dtm=pl.col("dtm").cast(pl.Datetime(time_unit)),
+        dtm_tz1=(
+            pl.col("dtm")
+            .cast(pl.Datetime(time_unit))
+            .dt.replace_time_zone("UTC")
+            .dt.convert_time_zone("Asia/Kathmandu")
+        ),
+        dtm_tz2=(
+            pl.col("dtm")
+            .cast(pl.Datetime(time_unit))
+            .dt.replace_time_zone("UTC")
+            .dt.convert_time_zone("Africa/Nairobi")
+        ),
+    )
+
+    df_julian = df.select(
+        julian_dt=pl.col("dt").dt.julian_date(),
+        julian_dtm=pl.col("dtm").dt.julian_date(),
+        julian_dtm_tz1=pl.col("dtm_tz1").dt.julian_date(),
+        julian_dtm_tz2=pl.col("dtm_tz2").dt.julian_date(),
+    )
+    expected = pl.DataFrame(
+        {
+            "julian_dt": [2415019.5, 2451544.5, 2467070.5],
+            "julian_dtm": [2482319.938030185, 2433374.55567272, 2455480.4999942128],
+            "julian_dtm_tz1": [2482319.938030185, 2433374.55567272, 2455480.4999942128],
+            "julian_dtm_tz2": [2482319.938030185, 2433374.55567272, 2455480.4999942128],
+        }
+    )
+    assert_frame_equal(df_julian, expected)
 
 
 @pytest.mark.parametrize(

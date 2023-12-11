@@ -30,6 +30,7 @@ pub enum TemporalFunction {
     Millisecond,
     Microsecond,
     Nanosecond,
+    JulianDate,
     ToString(String),
     CastTimeUnit(TimeUnit),
     WithTimeUnit(TimeUnit),
@@ -85,6 +86,7 @@ impl TemporalFunction {
                 DataType::Datetime(tu, _) => Ok(DataType::Datetime(*tu, None)),
                 dtype => polars_bail!(ComputeError: "expected Datetime, got {}", dtype),
             }),
+            JulianDate => mapper.with_dtype(DataType::Float64),
             Truncate(_) => mapper.with_same_dtype(),
             #[cfg(feature = "date_offset")]
             MonthStart => mapper.with_same_dtype(),
@@ -128,6 +130,7 @@ impl Display for TemporalFunction {
             WeekDay => "weekday",
             Day => "day",
             OrdinalDay => "ordinal_day",
+            JulianDate => "julian_date",
             Time => "time",
             Date => "date",
             Datetime => "datetime",
@@ -188,6 +191,9 @@ pub(super) fn day(s: &Series) -> PolarsResult<Series> {
 }
 pub(super) fn ordinal_day(s: &Series) -> PolarsResult<Series> {
     s.ordinal_day().map(|ca| ca.into_series())
+}
+pub(super) fn julian_date(s: &Series) -> PolarsResult<Series> {
+    s.julian_date().map(|ca| ca.into_series())
 }
 pub(super) fn time(s: &Series) -> PolarsResult<Series> {
     match s.dtype() {

@@ -98,7 +98,7 @@ class StringNameSpace:
             <https://docs.rs/chrono/latest/chrono/format/strftime/index.html>`_
             for the full specification. Example: `"%Y-%m-%d %H:%M:%S"`.
             If set to None (default), the format is inferred from the data.
-        time_unit : {None, 'us', 'ns', 'ms'}
+        time_unit : {'ns', 'us', 'ms', None}
             Unit of time for the resulting Datetime column. If set to None (default),
             the time unit is inferred from the format string if given, eg:
             `"%F %T%.3f"` => `Datetime("ms")`. If no fractional second component is

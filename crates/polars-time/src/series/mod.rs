@@ -120,6 +120,33 @@ pub trait TemporalMethods: AsSeries {
         }
     }
 
+    /// Returns the Julian date.
+    ///
+    /// The zero point is 12:00 on January 1st 4713 BC.
+    #[cfg(all(feature = "dtype-date", feature = "dtype-datetime"))]
+    fn julian_date(&self) -> PolarsResult<Float64Chunked> {
+        let s = self.as_series();
+        let offset_secs = 2440587.5;
+        let (scale, cast_time_unit) = match s.dtype() {
+            #[cfg(feature = "dtype-date")]
+            DataType::Date => (1e7, TimeUnit::Milliseconds),
+            #[cfg(feature = "dtype-datetime")]
+            DataType::Datetime(tu, _) => match tu {
+                TimeUnit::Milliseconds => (1e7, *tu),
+                TimeUnit::Microseconds => (1e10, *tu),
+                TimeUnit::Nanoseconds => (1e13, *tu),
+            },
+            dt => polars_bail!(opq = julian, dt),
+        };
+        // cast to utc epoch and apply scale/offset
+        let phys = s
+            .cast(&DataType::Datetime(cast_time_unit, None))?
+            .cast(&DataType::Float64)?;
+        (((phys / 8.64) + (offset_secs * scale)) / scale)
+            .f64()
+            .cloned()
+    }
+
     /// Extract year from underlying NaiveDateTime representation.
     /// Returns the year number in the calendar date.
     fn year(&self) -> PolarsResult<Int32Chunked> {

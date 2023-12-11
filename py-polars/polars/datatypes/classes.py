@@ -406,7 +406,7 @@ class Datetime(TemporalType):
 
         Parameters
         ----------
-        time_unit : {'us', 'ns', 'ms'}
+        time_unit : {'ns', 'us', 'ms'}
             Unit of time / precision.
         time_zone
             Time zone string, as defined in zoneinfo (to see valid strings run
@@ -459,7 +459,7 @@ class Duration(TemporalType):
 
         Parameters
         ----------
-        time_unit : {'us', 'ns', 'ms'}
+        time_unit : {'ns', 'us', 'ms'}
             Unit of time.
 
         """
