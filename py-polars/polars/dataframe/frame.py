@@ -5193,7 +5193,7 @@ class DataFrame:
         Parameters
         ----------
         function
-            Callable; will receive the frame as the first parameter,
+            Callable; will receive the DataFrame as the first parameter,
             followed by any given args/kwargs.
         *args
             Arguments to pass to the UDF.

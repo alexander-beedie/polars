@@ -17,6 +17,7 @@ from typing import (
     Mapping,
     NoReturn,
     Sequence,
+    TypeVar,
     Union,
     cast,
     overload,
@@ -144,6 +145,19 @@ if TYPE_CHECKING:
     from polars.utils.various import (
         NoDefault,
     )
+
+    if sys.version_info >= (3, 10):
+        from typing import Concatenate, ParamSpec
+    else:
+        from typing_extensions import Concatenate, ParamSpec
+
+    if sys.version_info >= (3, 11):
+        from typing import Self
+    else:
+        from typing_extensions import Self
+
+    T = TypeVar("T")
+    P = ParamSpec("P")
 
     if sys.version_info >= (3, 11):
         from typing import Self
@@ -1830,6 +1844,82 @@ class Series:
                 3.0
         ]
         """
+
+    def pipe(
+        self,
+        function: Callable[Concatenate[Series, P], T],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> T:
+        """
+        Offers a structured way to apply a sequence of user-defined functions (UDFs).
+
+        Parameters
+        ----------
+        function
+            Callable; will receive the Series as the first parameter,
+            followed by any given args/kwargs.
+        *args
+            Arguments to pass to the UDF.
+        **kwargs
+            Keyword arguments to pass to the UDF.
+
+        Notes
+        -----
+        If you expect to pipe multiple functions you should consider transforming the
+        `Series` to :meth:`df.lazy() <polars.DataFrame.lazy>` instead, so that the
+        operations can take full advantage of query optimization and avoid materializing
+        intermediary data (this suggestion also applies to writing the function body,
+        using `to_frame` to convert the Series to LazyFrame before chaining multiple
+        operations and finally collecting back to a result DataFrame and then Series).
+
+        Examples
+        --------
+        Declare a custom data cleaning function:
+
+        >>> def remove_outliers(
+        ...     srs: pl.Series,
+        ...     lower_percentile: float = 0.10,
+        ...     upper_percentile: float = 0.90,
+        ... ) -> pl.Series:
+        ...     c = pl.col(srs.name)
+        ...     return (
+        ...         srs.to_frame()
+        ...         .filter(
+        ...             c.is_between(
+        ...                 c.quantile(lower_percentile),
+        ...                 c.quantile(upper_percentile),
+        ...             )
+        ...         )
+        ...         .to_series()
+        ...     )
+
+        Apply to a target Series with the default parameter values:
+
+        >>> s = pl.Series("n", range(1, 8))
+        >>> s.pipe(remove_outliers)
+        shape: (5,)
+        Series: 'n' [i64]
+        [
+            2
+            3
+            4
+            5
+            6
+        ]
+
+        Apply to a target Series with specific parameter values:
+
+        >>> s.pipe(remove_outliers, 0.3, 0.7)
+        shape: (3,)
+        Series: 'n' [i64]
+        [
+            3
+            4
+            5
+        ]
+        """
+        return function(self, *args, **kwargs)
 
     def to_frame(self, name: str | None = None) -> DataFrame:
         """

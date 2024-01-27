@@ -2665,3 +2665,13 @@ def test_comp_series_with_str_13123() -> None:
     assert_series_equal(s == "1", pl.Series([True, False, None]))
     assert_series_equal(s.eq_missing("1"), pl.Series([True, False, False]))
     assert_series_equal(s.ne_missing("1"), pl.Series([False, True, True]))
+
+
+def test_series_pipe() -> None:
+    s = pl.Series("n", range(10))
+
+    def _mul(data: pl.Series, n: int) -> pl.Series:
+        return data * n
+
+    result = s.pipe(_mul, n=10)
+    assert_series_equal(result, s * 10)
