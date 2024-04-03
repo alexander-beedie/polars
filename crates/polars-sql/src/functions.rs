@@ -380,6 +380,22 @@ pub(crate) enum PolarsSQLFunctions {
     /// ```
     Upper,
 
+    //     // ----
+    //     // Comparison functions
+    //     // ----
+    //     /// SQL 'greatest' function
+    //     /// Returns the largest value in the provided values/columns.
+    //     /// ```sql
+    //     /// SELECT GREATEST(column_1, ...) from df;
+    //     /// ```
+    //     Greatest,
+    //     /// SQL 'least' function
+    //     /// Returns the smallest value in the provided values/columns.
+    //     /// ```sql
+    //     /// SELECT LEAST(column_1, ...) from df;
+    //     /// ```
+    //     Least,
+
     // ----
     // Conditional functions
     // ----

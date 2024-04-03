@@ -12,6 +12,7 @@ pub enum BinaryFunction {
     Contains,
     StartsWith,
     EndsWith,
+    Len,
     #[cfg(feature = "binary_encoding")]
     HexDecode(bool),
     #[cfg(feature = "binary_encoding")]
@@ -28,6 +29,7 @@ impl BinaryFunction {
         match self {
             Contains { .. } => mapper.with_dtype(DataType::Boolean),
             EndsWith | StartsWith => mapper.with_dtype(DataType::Boolean),
+            Len => mapper.with_dtype(DataType::UInt32),
             #[cfg(feature = "binary_encoding")]
             HexDecode(_) | Base64Decode(_) => mapper.with_same_dtype(),
             #[cfg(feature = "binary_encoding")]
@@ -43,6 +45,7 @@ impl Display for BinaryFunction {
             Contains { .. } => "contains",
             StartsWith => "starts_with",
             EndsWith => "ends_with",
+            Len => "len",
             #[cfg(feature = "binary_encoding")]
             HexDecode(_) => "hex_decode",
             #[cfg(feature = "binary_encoding")]
@@ -60,15 +63,10 @@ impl From<BinaryFunction> for SpecialEq<Arc<dyn SeriesUdf>> {
     fn from(func: BinaryFunction) -> Self {
         use BinaryFunction::*;
         match func {
-            Contains => {
-                map_as_slice!(contains)
-            },
-            EndsWith => {
-                map_as_slice!(ends_with)
-            },
-            StartsWith => {
-                map_as_slice!(starts_with)
-            },
+            Contains => {map_as_slice!(contains)},
+            EndsWith => { map_as_slice!(ends_with)},
+            StartsWith => {map_as_slice!(starts_with)},
+            Len => {map!(len)},
             #[cfg(feature = "binary_encoding")]
             HexDecode(strict) => map!(hex_decode, strict),
             #[cfg(feature = "binary_encoding")]
@@ -96,6 +94,12 @@ pub(super) fn ends_with(s: &[Series]) -> PolarsResult<Series> {
         .with_name(ca.name())
         .into_series())
 }
+
+pub(super) fn len(s: &Series) -> PolarsResult<Series> {
+    let ca = s.binary()?;
+    Ok(ca.bin_len().into_series())
+}
+
 
 pub(super) fn starts_with(s: &[Series]) -> PolarsResult<Series> {
     let ca = s[0].binary()?;

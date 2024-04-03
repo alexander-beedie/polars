@@ -58,4 +58,10 @@ impl BinaryNameSpace {
         self.0
             .map_private(FunctionExpr::BinaryExpr(BinaryFunction::Base64Encode))
     }
+
+    /// Return the number of bytes.
+    pub fn len(self) -> Expr {
+        self.0
+            .map_private(FunctionExpr::BinaryExpr(BinaryFunction::Len))
+    }
 }
