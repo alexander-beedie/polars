@@ -1,0 +1,212 @@
+# ---------------------------------------------------------------------------------
+# PostgreSQL database type codes:
+# ---------------------------------------------------------------------------------
+# In general we can infer the Polars DataType from the type name; certain entries
+# that are not reasonably inferable (or are potentially ambiguous) are hardcoded
+# with a more self-evident name, with the original commented-out to the right.
+# ---------------------------------------------------------------------------------
+
+# driver-specific overrides
+psycopg2 = {
+    650: "string",  # <- cidr
+    651: "string[]",  # <- cidr[]
+    869: "string",  # <- inet,
+    1041: "string[]",  # <- inet[],
+}
+
+# https://github.com/postgres/postgres/blob/master/src/include/catalog/pg_type.dat
+type_codes = {
+    16: "bool",
+    17: "bytea",
+    18: "char",
+    19: "string",  # <- name
+    20: "int8",
+    21: "int2",
+    22: "int2[]",  # <- int2vector
+    23: "int4",
+    24: "uint4",  # <- regproc
+    25: "text",
+    26: "uint4",  # <- oid
+    27: "tid",
+    28: "uint4",  # <- xid
+    29: "cid",
+    30: "oid[]",  # <- oidvector
+    32: "pg_ddl_command",
+    71: "pg_type",
+    75: "pg_attribute",
+    81: "pg_proc",
+    83: "pg_class",
+    114: "json",
+    142: "xml",
+    143: "xml[]",
+    194: "pg_node_tree",
+    199: "json[]",
+    210: "pg_type[]",
+    269: "table_am_handler",
+    270: "pg_attribute[]",
+    271: "uint8[]",  # <- xid8[]
+    272: "pg_proc[]",
+    273: "pg_class[]",
+    325: "index_am_handler",
+    600: "point",
+    601: "lseg",
+    602: "path",
+    603: "box",
+    604: "polygon",
+    628: "line",
+    629: "line[]",
+    650: "object",  # <- cidr
+    651: "object[]",  # <- cidr[]
+    700: "float4",
+    701: "float8",
+    705: "unknown",
+    718: "circle",
+    719: "circle[]",
+    774: "string",  # <- macaddr8
+    775: "string[]",  # <- macaddr8[]
+    790: "money",
+    791: "money[]",
+    829: "string",  # <- macaddr
+    869: "object",  # <- inet
+    1000: "bool[]",
+    1001: "bytea[]",
+    1002: "char[]",
+    1003: "string[]",  # <- name[]
+    1005: "int2[]",
+    1006: "int2[]",  # <- int2vector[],
+    1007: "int4[]",
+    1008: "regproc[]",
+    1009: "text[]",
+    1010: "tid[]",
+    1011: "uint4[]",  # <- xid[]
+    1012: "cid[]",
+    1013: "uint4[]",  # <- oidvector[]
+    1014: "bpchar[]",
+    1015: "varchar[]",
+    1016: "int8[]",
+    1017: "point[]",
+    1018: "lseg[]",
+    1019: "path[]",
+    1020: "box[]",
+    1021: "float4[]",
+    1022: "float8[]",
+    1027: "polygon[]",
+    1028: "uint4[]",  # <- oid[]
+    1033: "string",  # <- aclitem
+    1034: "string[]",  # <- aclitem[]
+    1040: "string[]",  # <- macaddr[]
+    1041: "object[]",  # <- inet[]
+    1042: "bpchar",
+    1043: "varchar",
+    1082: "date",
+    1083: "time",
+    1114: "timestamp",
+    1115: "timestamp[]",
+    1182: "date[]",
+    1183: "time[]",
+    1184: "timestamptz",
+    1185: "timestamptz[]",
+    1186: "interval",
+    1187: "interval[]",
+    1231: "numeric[]",
+    1263: "cstring[]",
+    1266: "timetz",
+    1270: "timetz[]",
+    1560: "bit",
+    1561: "bit[]",
+    1562: "varbit",
+    1563: "varbit[]",
+    1700: "numeric",
+    1790: "refcursor",
+    2201: "refcursor[]",
+    2202: "regprocedure",
+    2203: "regoper",
+    2204: "regoperator",
+    2205: "regclass",
+    2206: "regtype",
+    2207: "regprocedure[]",
+    2208: "regoper[]",
+    2209: "regoperator[]",
+    2210: "regclass[]",
+    2211: "regtype[]",
+    2249: "record",
+    2275: "cstring",
+    2276: "any",
+    2277: "anyarray",
+    2278: "void",
+    2279: "trigger",
+    2280: "language_handler",
+    2281: "internal",
+    2283: "anyelement",
+    2287: "_record",
+    2776: "anynonarray",
+    2949: "txid_snapshot[]",
+    2950: "object",  # <- uuid
+    2951: "object[]",  # <- uuid[]
+    2970: "txid_snapshot",
+    3115: "fdw_handler",
+    3220: "pg_lsn",
+    3221: "pg_lsn[]",
+    3310: "tsm_handler",
+    3361: "pg_ndistinct",
+    3402: "pg_dependencies",
+    3500: "anyenum",
+    3614: "tsvector",
+    3615: "tsquery",
+    3642: "gtsvector",
+    3643: "tsvector[]",
+    3644: "gtsvector[]",
+    3645: "tsquery[]",
+    3734: "regconfig",
+    3735: "regconfig[]",
+    3769: "regdictionary",
+    3770: "regdictionary[]",
+    3802: "jsonb",
+    3807: "jsonb[]",
+    3831: "anyrange",
+    3838: "event_trigger",
+    3904: "int4range",
+    3905: "int4range[]",
+    3906: "numrange",
+    3907: "numrange[]",
+    3908: "tsrange",
+    3909: "tsrange[]",
+    3910: "tstzrange",
+    3911: "tstzrange[]",
+    3912: "daterange",
+    3913: "daterange[]",
+    3926: "int8range",
+    3927: "int8range[]",
+    4072: "jsonpath",
+    4073: "jsonpath[]",
+    4089: "regnamespace",
+    4090: "regnamespace[]",
+    4096: "regrole",
+    4097: "regrole[]",
+    4191: "regcollation",
+    4192: "regcollation[]",
+    4451: "int4multirange",
+    4532: "nummultirange",
+    4533: "tsmultirange",
+    4534: "tstzmultirange",
+    4535: "datemultirange",
+    4536: "int8multirange",
+    4537: "anymultirange",
+    4538: "anycompatiblemultirange",
+    4600: "pg_brin_bloom_summary",
+    4601: "pg_brin_minmax_multi_summary",
+    5017: "pg_mcv_list",
+    5038: "pg_snapshot",
+    5039: "pg_snapshot[]",
+    5069: "uint8",  # <- xid8
+    5077: "anycompatible",
+    5078: "anycompatiblearray",
+    5079: "anycompatiblenonarray",
+    5080: "anycompatiblerange",
+    6150: "int4multirange[]",
+    6151: "nummultirange[]",
+    6152: "tsmultirange[]",
+    6153: "tstzmultirange[]",
+    6155: "datemultirange[]",
+    6157: "int8multirange[]",
+}
