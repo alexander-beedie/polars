@@ -15,8 +15,12 @@ from polars.datatypes import (
 from polars.exceptions import ModuleUpgradeRequired, UnsuitableSQLError
 from polars.io.database._arrow_registry import ARROW_DRIVER_REGISTRY
 from polars.io.database._cursor_proxies import ODBCCursorProxy, SurrealDBCursorProxy
-from polars.io.database._inference import _infer_dtype_from_cursor_description
 from polars.io.database._utils import _run_async
+from polars.io.database.inference.common import (
+    _backend_driver_from_alchemy_cursor,
+    _backend_from_driver,
+    infer_dtype_from_cursor_description,
+)
 
 if TYPE_CHECKING:
     import sys
@@ -307,9 +311,18 @@ class ConnectionExecutor:
         We currently only do the additional inference from string/python type values.
         (Further refinement will require per-driver module knowledge and lookups).
         """
+        backend, driver_name = (
+            _backend_driver_from_alchemy_cursor(self.cursor)
+            if self.driver_name == "sqlalchemy"
+            else (_backend_from_driver(self.driver_name), self.driver_name)
+        )
         for nm, desc in description.items():
             if desc is not None and nm not in schema_overrides:
-                dtype = _infer_dtype_from_cursor_description(self.cursor, desc)
+                dtype = infer_dtype_from_cursor_description(
+                    description=desc,
+                    backend=backend,
+                    driver_name=driver_name,
+                )
                 if dtype is not None:
                     schema_overrides[nm] = dtype  # type: ignore[index]
 

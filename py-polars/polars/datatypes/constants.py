@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     from polars.datatypes import PolarsDataType
     from polars.type_aliases import PolarsIntegerType, PolarsTemporalType, TimeUnit
 
-
 DTYPE_TEMPORAL_UNITS: frozenset[TimeUnit] = frozenset(["ns", "us", "ms"])
 DATETIME_DTYPES: frozenset[PolarsDataType] = DataTypeGroup(
     [
@@ -80,3 +79,15 @@ NESTED_DTYPES: frozenset[PolarsDataType] = DataTypeGroup([List, Struct, Array])
 
 # number of rows to scan by default when inferring datatypes
 N_INFER_DEFAULT = 100
+
+# mapping of signed to unsigned integer types, and vice versa
+SIGNED_UNSIGNED_INTEGER_LOOKUP: dict[PolarsDataType, PolarsDataType] = {
+    Int8: UInt8,
+    Int16: UInt16,
+    Int32: UInt32,
+    Int64: UInt64,
+    UInt8: Int8,
+    UInt16: Int16,
+    UInt32: Int32,
+    UInt64: Int64,
+}

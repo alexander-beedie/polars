@@ -53,7 +53,6 @@ from polars.dependencies import pyarrow as pa
 with contextlib.suppress(ImportError):  # Module not available when building docs
     from polars.polars import dtype_str_repr as _dtype_str_repr
 
-
 OptionType = type(Optional[type])
 if sys.version_info >= (3, 10):
     from types import NoneType, UnionType
@@ -90,10 +89,28 @@ PY_STR_TO_DTYPE: SchemaDict = {
 }
 
 
-@functools.lru_cache(16)
+@overload
 def _map_py_type_to_dtype(
     python_dtype: PythonDataType | type[object],
-) -> PolarsDataType:
+    *,
+    raise_unmatched: Literal[True] = ...,
+) -> PolarsDataType: ...
+
+
+@overload
+def _map_py_type_to_dtype(
+    python_dtype: PythonDataType | type[object],
+    *,
+    raise_unmatched: Literal[False],
+) -> PolarsDataType | None: ...
+
+
+@functools.lru_cache(16)  # type: ignore[misc]
+def _map_py_type_to_dtype(
+    python_dtype: PythonDataType | type[object],
+    *,
+    raise_unmatched: bool = True,
+) -> PolarsDataType | None:
     """Convert Python data type to Polars data type."""
     if python_dtype is float:
         return Float64
@@ -119,7 +136,7 @@ def _map_py_type_to_dtype(
         return List
     if python_dtype is PyDecimal:
         return Decimal
-    if python_dtype is bytes:
+    if python_dtype in (bytes, bytearray):
         return Binary
     if python_dtype is object:
         return Object
@@ -138,8 +155,11 @@ def _map_py_type_to_dtype(
                 dtype if nested is None else dtype(_map_py_type_to_dtype(nested))  # type: ignore[operator]
             )
 
-    msg = f"unrecognised Python type: {python_dtype!r}"
-    raise TypeError(msg)
+    if raise_unmatched:
+        msg = f"unrecognised Python type: {python_dtype!r}"
+        raise TypeError(msg)
+
+    return None
 
 
 def is_polars_dtype(
@@ -344,18 +364,27 @@ def dtype_to_py_type(dtype: PolarsDataType) -> PythonDataType:
 
 @overload
 def py_type_to_dtype(
-    data_type: Any, *, raise_unmatched: Literal[True] = ...
+    data_type: Any,
+    *,
+    raise_unmatched: Literal[True] = ...,
+    allow_strings: bool = ...,
 ) -> PolarsDataType: ...
 
 
 @overload
 def py_type_to_dtype(
-    data_type: Any, *, raise_unmatched: Literal[False]
+    data_type: Any,
+    *,
+    raise_unmatched: Literal[False],
+    allow_strings: bool = ...,
 ) -> PolarsDataType | None: ...
 
 
 def py_type_to_dtype(
-    data_type: Any, *, raise_unmatched: bool = True, allow_strings: bool = False
+    data_type: Any,
+    *,
+    raise_unmatched: bool = True,
+    allow_strings: bool = False,
 ) -> PolarsDataType | None:
     """Convert a Python dtype (or type annotation) to a Polars dtype."""
     if isinstance(data_type, ForwardRef):
