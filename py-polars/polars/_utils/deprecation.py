@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import inspect
+import sys
 import warnings
 from functools import wraps
 from typing import TYPE_CHECKING, Callable, Sequence, TypeVar
+
+if sys.version_info >= (3, 13):
+    from warnings import deprecated as deprecate_function
+else:
+    from typing_extensions import deprecated as deprecate_function
 
 from polars._utils.various import find_stacklevel
 
@@ -21,7 +27,6 @@ if TYPE_CHECKING:
 
     P = ParamSpec("P")
     T = TypeVar("T")
-
 
 USE_EARLIEST_TO_AMBIGUOUS: Mapping[bool, Ambiguous] = {
     True: "earliest",
@@ -45,7 +50,7 @@ def issue_deprecation_warning(message: str, *, version: str) -> None:
     warnings.warn(message, DeprecationWarning, stacklevel=find_stacklevel())
 
 
-def deprecate_function(
+def _deprecate_function(
     message: str, *, version: str
 ) -> Callable[[Callable[P, T]], Callable[P, T]]:
     """Decorator to mark a function as deprecated."""
@@ -60,9 +65,13 @@ def deprecate_function(
             return function(*args, **kwargs)
 
         wrapper.__signature__ = inspect.signature(function)  # type: ignore[attr-defined]
+        wrapper.__deprecated__ = message
         return wrapper
 
     return decorate
+
+
+globals()["deprecate_function"] = _deprecate_function
 
 
 def deprecate_renamed_function(
@@ -72,7 +81,7 @@ def deprecate_renamed_function(
     moved_or_renamed = "moved" if moved else "renamed"
     return deprecate_function(
         f"It has been {moved_or_renamed} to `{new_name}`.",
-        version=version,
+        version=version,  # pyright: ignore[reportCallIssue]
     )
 
 
