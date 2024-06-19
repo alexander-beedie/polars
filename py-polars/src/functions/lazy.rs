@@ -501,6 +501,6 @@ pub fn spearman_rank_corr(a: PyExpr, b: PyExpr, ddof: u8, propagate_nans: bool) 
 #[pyfunction]
 #[cfg(feature = "sql")]
 pub fn sql_expr(sql: &str) -> PyResult<PyExpr> {
-    let expr = polars::sql::sql_expr(sql).map_err(PyPolarsErr::from)?;
+    let expr = polars::sql::sql_expr(sql, None).map_err(PyPolarsErr::from)?;
     Ok(expr.into())
 }

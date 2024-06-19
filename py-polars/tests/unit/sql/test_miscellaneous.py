@@ -156,7 +156,8 @@ def test_register_context() -> None:
     assert ctx.tables() == []
 
 
-def test_sql_on_compatible_frame_types() -> None:
+@pytest.mark.parametrize("series_constraint", ["dfs.c = tbl.b", "tbl.b = dfs.c"])
+def test_sql_on_compatible_frame_types(series_constraint: str) -> None:
     df = pl.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
 
     # create various different frame types
@@ -170,14 +171,14 @@ def test_sql_on_compatible_frame_types() -> None:
         (dfp["a"] * 2).rename("c"),  # pandas series
     ):
         res = pl.sql(
-            """
+            f"""
             SELECT a, b, SUM(c) AS cc FROM (
               SELECT * FROM df               -- polars frame
                 UNION ALL SELECT * FROM dfp  -- pandas frame
                 UNION ALL SELECT * FROM dfa  -- pyarrow table
                 UNION ALL SELECT * FROM dfb  -- pyarrow record batch
             ) tbl
-            INNER JOIN dfs ON dfs.c == tbl.b -- join on pandas/polars series
+            INNER JOIN dfs ON {series_constraint}  -- join on pandas/polars series
             GROUP BY "a", "b"
             ORDER BY "a", "b"
             """

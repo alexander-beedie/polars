@@ -58,3 +58,35 @@ def test_struct_field_selection(struct_df: pl.DataFrame) -> None:
 def test_struct_indexing_errors(invalid_column: str, struct_df: pl.DataFrame) -> None:
     with pytest.raises(StructFieldNotFoundError, match="invalid_column"):
         struct_df.sql(f"SELECT {invalid_column} FROM self")
+
+
+@pytest.mark.parametrize(
+    "join_constraint",
+    [
+        "ON df1.json_msg.id = df2.json_msg.id",
+        "USING (json_msg.id)",
+    ],
+)
+def test_struct_join_constraints(join_constraint: str, struct_df: pl.DataFrame) -> None:
+    df1, df2 = (  # noqa: F841
+        struct_df,
+        pl.DataFrame(
+            {
+                "id": [600, 200, 500, 400],
+                "age": [42, 27, 20, 45],
+            }
+        ).select(pl.struct(pl.all()).alias("json_msg")),
+    )
+
+    res = pl.sql(f"""
+        SELECT df1.json_msg.* EXCLUDE other
+        FROM df1 LEFT SEMI JOIN df2 {join_constraint}
+    """)
+    expected = pl.DataFrame(
+        {
+            "id": [200, 400],
+            "name": ["Bob", "Zoe"],
+            "age": [27, 45],
+        }
+    ).select(pl.struct(pl.all()).alias("json_msg"))
+    assert_frame_equal(expected, res)

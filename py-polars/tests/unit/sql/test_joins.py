@@ -139,12 +139,12 @@ def test_join_inner(foods_ipc_path: Path, join_clause: str) -> None:
     "join_clause",
     [
         """
-        INNER JOIN tbl_b USING (a,b)
-        INNER JOIN tbl_c USING (c)
-        """,
-        """
         INNER JOIN tbl_b ON tbl_a.a = tbl_b.a AND tbl_a.b = tbl_b.b
         INNER JOIN tbl_c ON tbl_a.c = tbl_c.c
+        """,
+        """
+        INNER JOIN tbl_b USING (a,b)
+        INNER JOIN tbl_c USING (c)
         """,
     ],
 )

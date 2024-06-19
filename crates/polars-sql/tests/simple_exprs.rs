@@ -622,7 +622,7 @@ fn test_case_expr_with_expression() {
 #[test]
 fn test_sql_expr() {
     let df = create_sample_df().unwrap();
-    let expr = sql_expr("MIN(a)").unwrap();
+    let expr = sql_expr("MIN(a)", None).unwrap();
     let actual = df.clone().lazy().select(&[expr]).collect().unwrap();
     let expected = df.lazy().select(&[col("a").min()]).collect().unwrap();
     assert!(actual.equals(&expected));

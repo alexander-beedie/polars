@@ -230,7 +230,7 @@ fn test_compound_join_basic() {
     let mut ctx = prepare_compound_join_context();
     let sql = r#"
         SELECT * FROM df1
-        INNER JOIN df2 ON df1.a = df2.a AND df1.b = df2.b
+        INNER JOIN df2 ON df1.a = df2.a AND df2.b = df1.b
     "#;
     let actual = ctx.execute(sql).unwrap().collect().unwrap();
 
@@ -272,7 +272,7 @@ fn test_compound_join_different_column_names() {
         SELECT lf1.a, lf2.b, lf2.c
         FROM lf1 INNER JOIN lf2
           -- note: uses "lf1.a" for *both* constraint arms
-          ON lf1.a = lf2.b AND lf1.a = lf2.c
+          ON lf1.a = lf2.b AND lf2.c = lf1.a
         ORDER BY a
     "#;
     let actual = ctx.execute(sql).unwrap().collect().unwrap();
@@ -297,9 +297,9 @@ fn test_compound_join_three_tables() {
     let sql = r#"
         SELECT df3.* FROM df1
           INNER JOIN df2
-            ON df1.a = df2.a AND df1.b = df2.b
+            ON df1.a = df2.a AND df2.b = df1.b
           INNER JOIN df3
-            ON df3.a = df1.a AND df3.b = df1.b
+            ON df1.a = df3.a AND df3.b = df1.b
     "#;
     let actual = ctx.execute(sql).unwrap().collect().unwrap();
     let expected = df! {
@@ -349,9 +349,9 @@ fn test_compound_join_nested_and() {
             SELECT {} FROM df1
                 INNER JOIN df2 ON
                     df1.a = df2.a AND
-                    df1.b = df2.b AND
+                    df2.b = df1.b AND
                     df1.c = df2.c AND
-                    df1.d = df2.d
+                    df2.d = df1.d
          "#,
             cols
         );
@@ -431,7 +431,7 @@ fn test_compound_join_nested_and_with_brackets() {
     let df2 = df! {
         "a" => [1, 2, 3, 4, 5],
         "b" => [1, 3, 3, 5, 6],
-        "c" => [0, 3, 4, 5, 6],
+        "x" => [0, 3, 4, 5, 6],
         "d" => [0, 3, 4, 5, 6],
         "e" => ["w", "x", "y", "z", "!"],
     }
@@ -445,7 +445,7 @@ fn test_compound_join_nested_and_with_brackets() {
         SELECT df1.* EXCLUDE "e", df2.e
         FROM df1
           INNER JOIN df2 ON df1.a = df2.a AND
-            ((df1.b = df2.b AND df1.c = df2.c) AND df1.d = df2.d)
+            ((df1.b = df2.b AND df2.x = df1.c) AND df1.d = df2.d)
      "#;
     let actual = ctx.execute(sql).unwrap().collect().unwrap();
     let expected = df! {
@@ -468,7 +468,7 @@ fn test_compound_join_nested_and_with_brackets() {
         SELECT * EXCLUDE ("e", "e:df2"), df1.e
         FROM df1
           INNER JOIN df2 ON df1.a = df2.a AND
-            ((df1.b = df2.b AND df1.c = df2.c) AND df1.d = df2.d)
+            ((df1.b = df2.b AND df1.c = df2.x) AND df1.d = df2.d)
      "#;
     let actual = ctx.execute(sql).unwrap().collect().unwrap();
 
@@ -479,7 +479,7 @@ fn test_compound_join_nested_and_with_brackets() {
         "d" => [0, 4],
         "a:df2" => [1, 3],
         "b:df2" => [1, 3],
-        "c:df2" => [0, 4],
+        "x" => [0, 4],
         "d:df2" => [0, 4],
         "e" => ["a", "c"],
     }
@@ -506,11 +506,46 @@ fn test_join_on_different_keys() {
     let sql = r#"
         SELECT df2.*
         FROM df1
-        INNER JOIN df2 ON df1.x = df2.y
+        INNER JOIN df2 ON df2.y = df1.x
         ORDER BY y
     "#;
     let actual = ctx.execute(sql).unwrap().collect().unwrap();
     let expected = df! {"y" => [0, 1, 3]}.unwrap();
+    assert!(
+        actual.equals(&expected),
+        "expected = {:?}\nactual={:?}",
+        expected,
+        actual
+    );
+}
+
+#[test]
+fn test_join_multi_consecutive() {
+    let df1 = df! { "a" => [1, 2, 3], "b" => [4, 8, 6] }.unwrap();
+    let df2 = df! { "a" => [3, 2, 1], "b" => [6, 5, 4], "c" => ["x", "y", "z"] }.unwrap();
+    let df3 = df! { "c" => ["w", "y", "z"], "d" => [10.5, -50.0, 25.5] }.unwrap();
+
+    let mut ctx = SQLContext::new();
+    ctx.register("tbl_a", df1.lazy());
+    ctx.register("tbl_b", df2.lazy());
+    ctx.register("tbl_c", df3.lazy());
+
+    let sql = r#"
+        SELECT tbl_a.a, tbl_a.b, tbl_b.c, tbl_c.d FROM tbl_a
+        INNER JOIN tbl_b ON tbl_a.a = tbl_b.a AND tbl_a.b = tbl_b.b
+        INNER JOIN tbl_c ON tbl_a.c = tbl_c.c
+        ORDER BY a DESC
+    "#;
+    let actual = ctx.execute(sql).unwrap().collect().unwrap();
+
+    let expected = df! {
+        "a" => [1],
+        "b" => [4],
+        "c" => ["z"],
+        "d" => [25.5],
+    }
+    .unwrap();
+
     assert!(
         actual.equals(&expected),
         "expected = {:?}\nactual={:?}",
