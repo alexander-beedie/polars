@@ -178,4 +178,14 @@ impl Expr {
     pub fn sign(self) -> Self {
         self.map_private(FunctionExpr::Sign)
     }
+
+    /// Saturating addition
+    pub fn saturating_add(self, x: Self) -> Self {
+        self.map_many_private(FunctionExpr::SaturatingAdd, &[x], false, false)
+    }
+
+    /// Saturating subtraction
+    pub fn saturating_sub(self, x: Self) -> Self {
+        self.map_many_private(FunctionExpr::SaturatingSub, &[x], false, false)
+    }
 }

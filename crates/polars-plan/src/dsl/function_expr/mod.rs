@@ -67,6 +67,7 @@ mod temporal;
 #[cfg(feature = "trigonometry")]
 pub mod trigonometry;
 mod unique;
+mod saturating;
 
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
@@ -352,6 +353,8 @@ pub enum FunctionExpr {
     #[cfg(feature = "reinterpret")]
     Reinterpret(bool),
     ExtendConstant,
+    SaturatingAdd,
+    SaturatingSub,
 }
 
 impl Hash for FunctionExpr {
@@ -579,6 +582,8 @@ impl Hash for FunctionExpr {
             ExtendConstant => {},
             #[cfg(feature = "top_k")]
             TopKBy { descending } => descending.hash(state),
+            SaturatingAdd => {},
+            SaturatingSub => {},
         }
     }
 }
@@ -764,6 +769,8 @@ impl Display for FunctionExpr {
             #[cfg(feature = "reinterpret")]
             Reinterpret(_) => "reinterpret",
             ExtendConstant => "extend_constant",
+            SaturatingAdd => "saturating_add",
+            SaturatingSub => "saturating_sub",
         };
         write!(f, "{s}")
     }
@@ -1157,6 +1164,8 @@ impl From<FunctionExpr> for SpecialEq<Arc<dyn SeriesUdf>> {
             #[cfg(feature = "reinterpret")]
             Reinterpret(signed) => map!(dispatch::reinterpret, signed),
             ExtendConstant => map_as_slice!(dispatch::extend_constant),
+            SaturatingAdd => wrap!(saturating::saturating_add),
+            SaturatingSub => wrap!(saturating::saturating_sub),
         }
     }
 }

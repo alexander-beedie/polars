@@ -1223,6 +1223,37 @@ pub(crate) fn parse_extract_date_part(expr: Expr, field: &DateTimeField) -> Pola
     })
 }
 
+/// Allow an expression that represents a 1-indexed parameter to
+/// be adjusted from 1-indexed (SQL) to 0-indexed (Rust/Polars)
+pub(crate) fn adjust_one_indexed_param(idx: Expr, null_if_zero: bool) -> Expr {
+    match idx {
+        // null and zero case
+        Expr::Literal(Null) => lit(Null),
+        Expr::Literal(LiteralValue::Int(0)) => {
+            if null_if_zero {
+                lit(Null)
+            } else {
+                idx
+            }
+        },
+        // negative case
+        Expr::Literal(LiteralValue::Int(n)) if n < 0 => idx,
+        // positive case (> 0)
+        Expr::Literal(LiteralValue::Int(n)) => lit(n - 1),
+        // non-literal expressions
+        _ => {
+            let idx_minus_one = idx.clone().saturating_sub(lit(1));
+            if null_if_zero {
+                when(idx.clone().eq(lit(0)))
+                    .then(lit(Null))
+                    .otherwise(idx_minus_one)
+            } else {
+                idx_minus_one
+            }
+        },
+    }
+}
+
 fn bitstring_to_bytes_literal(b: &String) -> PolarsResult<Expr> {
     let n_bits = b.len();
     if !b.chars().all(|c| c == '0' || c == '1') || n_bits > 64 {

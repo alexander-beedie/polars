@@ -25,7 +25,7 @@ impl FunctionExpr {
             #[cfg(feature = "dtype-struct")]
             StructExpr(s) => s.get_field(mapper),
             #[cfg(feature = "temporal")]
-            TemporalExpr(fun) => fun.get_field(mapper),
+            TemporalExpr(func) => func.get_field(mapper),
 
             // Other expressions
             Boolean(func) => func.get_field(mapper),
@@ -329,6 +329,8 @@ impl FunctionExpr {
                 mapper.with_dtype(dt)
             },
             ExtendConstant => mapper.with_same_dtype(),
+            SaturatingAdd => mapper.with_same_dtype(),
+            SaturatingSub => mapper.with_same_dtype(),
         }
     }
 
