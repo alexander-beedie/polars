@@ -237,14 +237,9 @@ pub enum FunctionExpr {
     #[cfg(feature = "interpolate_by")]
     InterpolateBy,
     #[cfg(feature = "log")]
-    Entropy {
-        base: f64,
-        normalize: bool,
-    },
+    Entropy,
     #[cfg(feature = "log")]
-    Log {
-        base: f64,
-    },
+    Log,
     #[cfg(feature = "log")]
     Log1p,
     #[cfg(feature = "log")]
@@ -483,12 +478,9 @@ impl Hash for FunctionExpr {
             #[cfg(feature = "pct_change")]
             PctChange => {},
             #[cfg(feature = "log")]
-            Entropy { base, normalize } => {
-                base.to_bits().hash(state);
-                normalize.hash(state);
-            },
+            Entropy => {},
             #[cfg(feature = "log")]
-            Log { base } => base.to_bits().hash(state),
+            Log => {},
             #[cfg(feature = "log")]
             Log1p => {},
             #[cfg(feature = "log")]
@@ -1034,9 +1026,9 @@ impl From<FunctionExpr> for SpecialEq<Arc<dyn SeriesUdf>> {
                 map_as_slice!(dispatch::interpolate_by)
             },
             #[cfg(feature = "log")]
-            Entropy { base, normalize } => map!(log::entropy, base, normalize),
+            Entropy => map!(log::entropy),
             #[cfg(feature = "log")]
-            Log { base } => map!(log::log, base),
+            Log => map!(log::log),
             #[cfg(feature = "log")]
             Log1p => map!(log::log1p),
             #[cfg(feature = "log")]

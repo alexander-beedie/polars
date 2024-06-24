@@ -1783,8 +1783,9 @@ impl Expr {
 
     #[cfg(feature = "log")]
     /// Compute the logarithm to a given base.
-    pub fn log(self, base: f64) -> Self {
-        self.map_private(FunctionExpr::Log { base })
+    pub fn log(self, base: Expr) -> Self {
+        self.apply_many_private(FunctionExpr::Log, &[base], false, false)
+
     }
 
     #[cfg(feature = "log")]
@@ -1802,12 +1803,8 @@ impl Expr {
     #[cfg(feature = "log")]
     /// Compute the entropy as `-sum(pk * log(pk)`.
     /// where `pk` are discrete probabilities.
-    pub fn entropy(self, base: f64, normalize: bool) -> Self {
-        self.apply_private(FunctionExpr::Entropy { base, normalize })
-            .with_function_options(|mut options| {
-                options.returns_scalar = true;
-                options
-            })
+    pub fn entropy(self, base: Expr, normalize: Expr) -> Self {
+        self.apply_many_private(FunctionExpr::Entropy, &[base, normalize], false, false)
     }
     /// Get the null count of the column/group.
     pub fn null_count(self) -> Expr {

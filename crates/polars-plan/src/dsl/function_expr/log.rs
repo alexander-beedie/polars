@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) fn entropy(s: &Series, base: f64, normalize: bool) -> PolarsResult<Series> {
+pub(super) fn entropy(s: &[Series]) -> PolarsResult<Series> {
     let out = s.entropy(base, normalize)?;
     if matches!(s.dtype(), DataType::Float32) {
         let out = out as f32;
@@ -10,7 +10,7 @@ pub(super) fn entropy(s: &Series, base: f64, normalize: bool) -> PolarsResult<Se
     }
 }
 
-pub(super) fn log(s: &Series, base: f64) -> PolarsResult<Series> {
+pub(super) fn log(s: &[Series]) -> PolarsResult<Series> {
     Ok(s.log(base))
 }
 
