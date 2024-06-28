@@ -323,3 +323,91 @@ def test_implicit_joins() -> None:
             WHERE t1.a = t2.b
             """
         )
+
+
+def test_natural_joins() -> None:
+    df1 = pl.DataFrame(
+        {
+            "CharacterID": [1, 2, 3, 4],
+            "FirstName": ["Jernau Morat", "Cheradenine", "Byr", "Diziet"],
+            "LastName": ["Gurgeh", "Zakalwe", "Genar-Hofoen", "Sma"],
+        }
+    )
+    df2 = pl.DataFrame(
+        {
+            "CharacterID": [1, 2, 3, 5],
+            "Role": ["Protagonist", "Protagonist", "Protagonist", "Antagonist"],
+            "Book": [
+                "Player of Games",
+                "Use of Weapons",
+                "Excession",
+                "Consider Phlebas",
+            ],
+        }
+    )
+    df3 = pl.DataFrame(
+        {
+            "CharacterID": [1, 2, 3, 4],
+            "Affiliation": ["Culture", "Culture", "Culture", "Shellworld"],
+            "Species": ["Pan-human", "Human", "Human", "Oct"],
+        }
+    )
+    df4 = pl.DataFrame(
+        {
+            "CharacterID": [1, 2, 3, 6],
+            "Ship": [
+                "Limiting Factor",
+                "Xenophobe",
+                "Grey Area",
+                "Falling Outside The Normal Moral Constraints",
+            ],
+            "Drone": ["Flere-Imsaho", "Skaffen-Amtiskaw", "Eccentric", "Psychopath"],
+        }
+    )
+    with pl.SQLContext(
+        {"df1": df1, "df2": df2, "df3": df3, "df4": df4}, eager=True
+    ) as ctx:
+        res = ctx.execute(
+            """
+            SELECT COLUMNS('^[^:]*$')
+            FROM df1
+            NATURAL JOIN df2
+            NATURAL JOIN df3
+            NATURAL JOIN df4
+            """
+        )
+        assert res.rows(named=True) == [
+            {
+                "CharacterID": 1,
+                "FirstName": "Jernau Morat",
+                "LastName": "Gurgeh",
+                "Role": "Protagonist",
+                "Book": "Player of Games",
+                "Affiliation": "Culture",
+                "Species": "Pan-human",
+                "Ship": "Limiting Factor",
+                "Drone": "Flere-Imsaho",
+            },
+            {
+                "CharacterID": 2,
+                "FirstName": "Cheradenine",
+                "LastName": "Zakalwe",
+                "Role": "Protagonist",
+                "Book": "Use of Weapons",
+                "Affiliation": "Culture",
+                "Species": "Human",
+                "Ship": "Xenophobe",
+                "Drone": "Skaffen-Amtiskaw",
+            },
+            {
+                "CharacterID": 3,
+                "FirstName": "Byr",
+                "LastName": "Genar-Hofoen",
+                "Role": "Protagonist",
+                "Book": "Excession",
+                "Affiliation": "Culture",
+                "Species": "Human",
+                "Ship": "Grey Area",
+                "Drone": "Eccentric",
+            },
+        ]
