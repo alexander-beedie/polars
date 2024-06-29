@@ -297,7 +297,15 @@ impl SQLExprVisitor<'_> {
                 expr,
                 subquery,
                 negated,
-            } => self.visit_in_subquery(expr, subquery, *negated),
+            } => {
+                let res = self.visit_subquery(subquery, SubqueryRestriction::SingleColumn)?;
+                let expr = self.visit_expr(expr)?;
+                Ok(if *negated {
+                    expr.is_in(res).not()
+                } else {
+                    expr.is_in(res)
+                })
+            },
             SQLExpr::Interval(interval) => self.visit_interval(interval),
             SQLExpr::IsDistinctFrom(e1, e2) => {
                 Ok(self.visit_expr(e1)?.neq_missing(self.visit_expr(e2)?))
@@ -347,7 +355,9 @@ impl SQLExprVisitor<'_> {
                 Ok(if *negated { matches.not() } else { matches })
             },
             SQLExpr::Subscript { expr, subscript } => self.visit_subscript(expr, subscript),
-            SQLExpr::Subquery(_) => polars_bail!(SQLInterface: "unexpected subquery"),
+            SQLExpr::Subquery(query) => {
+                self.visit_subquery(query, SubqueryRestriction::SingleColumn)
+            },
             SQLExpr::Trim {
                 expr,
                 trim_where,
@@ -1019,22 +1029,6 @@ impl SQLExprVisitor<'_> {
             (Some(TrimWhereField::Leading), Some(val)) => expr.str().strip_chars_start(lit(val)),
             (Some(TrimWhereField::Trailing), None) => expr.str().strip_chars_end(lit(Null)),
             (Some(TrimWhereField::Trailing), Some(val)) => expr.str().strip_chars_end(lit(val)),
-        })
-    }
-
-    /// Visit a SQL subquery inside and `IN` expression.
-    fn visit_in_subquery(
-        &mut self,
-        expr: &SQLExpr,
-        subquery: &Subquery,
-        negated: bool,
-    ) -> PolarsResult<Expr> {
-        let subquery_result = self.visit_subquery(subquery, SubqueryRestriction::SingleColumn)?;
-        let expr = self.visit_expr(expr)?;
-        Ok(if negated {
-            expr.is_in(subquery_result).not()
-        } else {
-            expr.is_in(subquery_result)
         })
     }
 

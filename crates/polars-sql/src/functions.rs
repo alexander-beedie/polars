@@ -4,7 +4,9 @@ use polars_core::prelude::{polars_bail, polars_err, DataType, PolarsResult, Sche
 use polars_lazy::dsl::Expr;
 #[cfg(feature = "list_eval")]
 use polars_lazy::dsl::ListNameSpaceExtension;
-use polars_plan::dsl::{coalesce, concat_str, len, max_horizontal, min_horizontal, when};
+use polars_plan::dsl::{
+    all_horizontal, any_horizontal, coalesce, concat_str, len, max_horizontal, min_horizontal, when,
+};
 use polars_plan::plans::{typed_lit, LiteralValue};
 use polars_plan::prelude::LiteralValue::Null;
 use polars_plan::prelude::{col, cols, lit, StrptimeOptions};
@@ -604,9 +606,15 @@ pub(crate) enum PolarsSQLFunctions {
     ArrayContains,
 
     // ----
-    // Column selection
+    // Selection
     // ----
     Columns,
+
+    // ----
+    // Logical
+    // ----
+    All,
+    Any,
 
     // ----
     // User-defined
@@ -620,6 +628,8 @@ impl PolarsSQLFunctions {
             "abs",
             "acos",
             "acosd",
+            "all",
+            "any",
             "array_contains",
             "array_get",
             "array_length",
@@ -837,9 +847,15 @@ impl PolarsSQLFunctions {
             "unnest" => Self::Explode,
 
             // ----
-            // Column selection
+            // Selection
             // ----
             "columns" => Self::Columns,
+
+            // ----
+            // Logical
+            // ----
+            "all" => Self::All,
+            "any" => Self::Any,
 
             other => {
                 if ctx.function_registry.contains(other) {
@@ -1268,10 +1284,10 @@ impl SQLFunctionVisitor<'_> {
             Explode => self.visit_unary(|e| e.explode()),
 
             // ----
-            // Column selection
+            // Selection
             // ----
             Columns => {
-                let active_schema = self.active_schema.clone();
+                let active_schema = self.active_schema;
                 self.try_visit_unary(|e: Expr| {
                     match e {
                         Expr::Literal(LiteralValue::String(pat)) => {
@@ -1307,6 +1323,26 @@ impl SQLFunctionVisitor<'_> {
             },
 
             // ----
+            // Logical
+            // ----
+            All => {
+                let args = extract_args(function)?;
+                match args.len() {
+                    0 => polars_bail!(SQLSyntax: "ALL expects 1 argument (found 0)"),
+                    1 => match &args[0] {
+                        FunctionArgExpr::Expr(q @ SQLExpr::Subquery(_)) => {
+                            Ok(parse_sql_expr(q, self.ctx, self.active_schema)?.all(true))
+                        },
+                        _ => self.not_supported_error(),
+                    },
+                    _ => {
+                        polars_bail!(SQLSyntax: "TODO") //loop over exprs and combine with all_horizontal,
+                    },
+                }
+            },
+            Any => polars_bail!(SQLSyntax: "TODO"),
+
+            // ----
             // User-defined
             // ----
             Udf(func_name) => self.visit_udf(&func_name),
@@ -1318,7 +1354,7 @@ impl SQLFunctionVisitor<'_> {
             .into_iter()
             .map(|arg| {
                 if let FunctionArgExpr::Expr(e) = arg {
-                    parse_sql_expr(e, self.ctx, self.active_schema)
+                    parse_sql_expr(&e, self.ctx, self.active_schema)
                 } else {
                     polars_bail!(SQLInterface: "only expressions are supported in UDFs")
                 }
@@ -1459,7 +1495,7 @@ impl SQLFunctionVisitor<'_> {
         let mut expr_args = vec![];
         for arg in args {
             if let FunctionArgExpr::Expr(sql_expr) = arg {
-                expr_args.push(parse_sql_expr(sql_expr, self.ctx, self.active_schema)?);
+                expr_args.push(parse_sql_expr(&sql_expr, self.ctx, self.active_schema)?);
             } else {
                 return self.not_supported_error();
             };
@@ -1647,19 +1683,19 @@ impl SQLFunctionVisitor<'_> {
     }
 }
 
-fn extract_args(func: &SQLFunction) -> PolarsResult<Vec<&FunctionArgExpr>> {
+fn extract_args(func: &SQLFunction) -> PolarsResult<Vec<FunctionArgExpr>> {
     let (args, _, _) = _extract_func_args(func, false, false)?;
     Ok(args)
 }
 
-fn extract_args_distinct(func: &SQLFunction) -> PolarsResult<(Vec<&FunctionArgExpr>, bool)> {
+fn extract_args_distinct(func: &SQLFunction) -> PolarsResult<(Vec<FunctionArgExpr>, bool)> {
     let (args, is_distinct, _) = _extract_func_args(func, true, false)?;
     Ok((args, is_distinct))
 }
 
 fn extract_args_and_clauses(
     func: &SQLFunction,
-) -> PolarsResult<(Vec<&FunctionArgExpr>, bool, Vec<FunctionArgumentClause>)> {
+) -> PolarsResult<(Vec<FunctionArgExpr>, bool, Vec<FunctionArgumentClause>)> {
     _extract_func_args(func, true, true)
 }
 
@@ -1667,7 +1703,7 @@ fn _extract_func_args(
     func: &SQLFunction,
     get_distinct: bool,
     get_clauses: bool,
-) -> PolarsResult<(Vec<&FunctionArgExpr>, bool, Vec<FunctionArgumentClause>)> {
+) -> PolarsResult<(Vec<FunctionArgExpr>, bool, Vec<FunctionArgumentClause>)> {
     match &func.args {
         FunctionArguments::List(FunctionArgumentList {
             args,
@@ -1683,15 +1719,16 @@ fn _extract_func_args(
                 let unpacked_args = args
                     .iter()
                     .map(|arg| match arg {
-                        FunctionArg::Named { arg, .. } => arg,
-                        FunctionArg::Unnamed(arg) => arg,
+                        FunctionArg::Named { arg, .. } => arg.clone(),
+                        FunctionArg::Unnamed(arg) => arg.clone(),
                     })
                     .collect();
                 Ok((unpacked_args, is_distinct, clauses.clone()))
             }
         },
-        FunctionArguments::Subquery { .. } => {
-            Err(polars_err!(SQLInterface: "subquery not expected in {}", func.name))
+        FunctionArguments::Subquery(query) => {
+            let subquery = FunctionArgExpr::Expr(SQLExpr::Subquery(query.clone()));
+            Ok((vec![subquery], false, vec![]))
         },
         FunctionArguments::None => Ok((vec![], false, vec![])),
     }
