@@ -60,7 +60,22 @@ a:visited {
     margin: 0 !important;
 }
 
-/* give code examples the same faint drop-shadow as admonitions */
+/* give code examples and tables the same faint drop-shadow as admonitions */
 pre {
     box-shadow: 0 .2rem .5rem var(--pst-color-shadow), 0 0 .0625rem var(--pst-color-shadow) !important;
+}
+
+/*
+ visually-consistent table rendering
+ (no odd purple highlights and blue/grey stripes)
+*/
+table.table {
+    box-shadow: 0 .2rem .5rem var(--pst-color-shadow), 0 0 .0625rem var(--pst-color-shadow) !important;
+    line-height: 1.2em;
+    border: 1px solid var(--pst-color-border);
+}
+
+table.table th, table.table td {
+    background-color: var(--pst-color-surface);
+    border: 0px;
 }
