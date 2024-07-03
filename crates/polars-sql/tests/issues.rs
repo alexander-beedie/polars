@@ -18,7 +18,7 @@ fn iss_7437() -> PolarsResult<()> {
             SELECT "category" as category
             FROM foods
             GROUP BY "category"
-    "#,
+        "#,
         )?
         .collect()?
         .sort(["category"], SortMultipleOptions::default())?;
@@ -125,6 +125,7 @@ fn iss_8419() {
     }
     .unwrap()
     .lazy();
+
     let expected = df
         .clone()
         .select(&[
@@ -139,6 +140,7 @@ fn iss_8419() {
         .sort(["SalesCumulative"], Default::default())
         .collect()
         .unwrap();
+
     let mut ctx = SQLContext::new();
     ctx.register("df", df);
 
@@ -156,4 +158,92 @@ fn iss_8419() {
     let df = ctx.execute(query).unwrap().collect().unwrap();
 
     assert!(df.equals(&expected))
+}
+
+#[test]
+fn iss_17381() {
+    let users = df! {
+        "id" => ["1", "2", "3", "4", "5", "6"],
+        "email" => [
+            "john.doe@company.com",
+            "jane.doe@company.com",
+            "doe.smith@company.com",
+            "emily.johnsom@company.com",
+            "alex.brown@company.com",
+            "michael.davies@company.com",
+        ]
+    }
+    .unwrap()
+    .lazy();
+
+    let user_groups = df! {
+        "user_id" => ["1", "2", "3", "4", "5", "6"],
+        "group_id" => ["1", "1", "2", "2", "3", "4"]
+    }
+    .unwrap()
+    .lazy();
+
+    let group_group = df! {
+    "parent_id" => ["3", "3", "4"],
+    "child_id" => ["1", "2", "3"]
+    }
+    .unwrap()
+    .lazy();
+
+    let deals = df! {
+        "id" => [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        "region" => ["East", "East", "East", "East", "East", "East", "West", "West", "West", "West", "West", "West"],
+        "owner_id" => ["1", "1", "1", "2", "2", "2", "3", "3", "3", "4", "4", "5"],
+        "product" => ["Tee", "Golf", "Fancy", "Tee", "Golf", "Fancy", "Tee", "Golf", "Fancy", "Tee", "Golf", "Fancy"],
+        "units" => [12, 12, 12, 10, 10, 10, 11, 11, 12, 12, 11, 11],
+        "price" => [11.04, 13.00, 11.96, 11.27, 12.12, 13.74, 11.44, 12.63, 12.06, 13.42, 11.48, 11.48]
+    }.unwrap().lazy();
+
+    let mut ctx = SQLContext::new();
+
+    ctx.register("users", users);
+    ctx.register("user_groups", user_groups);
+    ctx.register("group_group", group_group);
+    ctx.register("deals", deals);
+
+    let query = r#"
+    WITH
+      "user_by_email" AS (
+        SELECT "users"."id"
+          FROM "users"
+          WHERE "email" IN ('john.doe@company.com')
+      ),
+      "user_child" AS (
+        SELECT "user_groups"."user_id" AS "input_user_id", "group_group"."child_id"
+          FROM "user_groups"
+          INNER JOIN "user_by_email" ON "user_groups"."user_id" = "user_by_email"."id"
+          INNER JOIN "group_group" ON "user_groups"."group_id" = "group_group"."parent_id"
+      ),
+      "deals_authz" AS (
+        SELECT *
+          FROM "deals"
+          WHERE
+          (
+            ("deals"."owner_id" IN (SELECT "users"."id" FROM "users" WHERE "email" = 'john.doe@company.com'))
+            OR
+            ("deals"."owner_id" IN
+              (SELECT DISTINCT "right"."user_id"
+                FROM "user_groups" AS "left"
+                  INNER JOIN "user_by_email" ON "user_groups"."user_id" = "user_by_email"."id"
+                  INNER JOIN "user_groups" AS "right" ON "left"."group_id" = "right"."group_id"
+            ))
+          )
+          OR ("deals"."owner_id" IN
+            (SELECT DISTINCT "user_groups"."user_id"
+              FROM "user_groups"
+              INNER JOIN "user_child" ON "user_groups"."group_id" = "user_child"."child_id"
+          ))
+      )
+    SELECT "id"
+      FROM "deals_authz" AS "deals"
+      ORDER BY "id" ASC
+    "#;
+
+    let _df = ctx.execute(query).unwrap().collect().unwrap();
+    //dbg!(df);
 }
