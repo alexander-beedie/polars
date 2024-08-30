@@ -179,6 +179,28 @@ if TYPE_CHECKING:
     P = ParamSpec("P")
 
 
+class ColumnComplete:
+    """Namespace for autocompleting a specific DataFrame's columns."""
+
+    def __init__(self, frame: DataFrame):
+        self._col_names = frame.columns
+        for name in self._col_names:
+            setattr(self, name, F.col(name))
+
+    def __dir__(self) -> list[str]:
+        return self._col_names
+
+    def __getitem__(self, name: str) -> Expr:
+        if name not in self._col_names:
+            raise ColumnNotFoundError(name)
+        return F.col(name)
+
+    __call__ = __getitem__
+
+    def _ipython_key_completions_(self) -> list[str]:
+        return self._col_names
+
+
 class DataFrame:
     """
     Two-dimensional data structure representing data as a table with rows and columns.
@@ -335,6 +357,7 @@ class DataFrame:
     """
 
     _df: PyDataFrame
+    _col: ColumnComplete
     _accessors: ClassVar[set[str]] = {"plot", "style"}
 
     def __init__(
@@ -849,6 +872,13 @@ class DataFrame:
             The length of the list should be equal to the width of the `DataFrame`.
         """
         self._df.set_column_names(names)
+
+    @property
+    def col(self) -> ColumnComplete:
+        """Access DataFrame columns by attribute."""
+        if getattr(self, "_col", None) is None:
+            self._col = ColumnComplete(frame=self)
+        return self._col
 
     @property
     def dtypes(self) -> list[DataType]:
