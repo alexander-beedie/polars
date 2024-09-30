@@ -9,6 +9,8 @@ from polars.convert import from_arrow
 from polars.datatypes import Null, Time
 from polars.datatypes.convert import unpack_dtypes
 from polars.dependencies import _DELTALAKE_AVAILABLE, deltalake
+from polars.functions import concat
+from polars.io.parquet import scan_parquet
 from polars.io.pyarrow_dataset import scan_pyarrow_dataset
 
 if TYPE_CHECKING:
@@ -281,9 +283,19 @@ def scan_delta(
         storage_options=storage_options,
         delta_table_options=delta_table_options,
     )
-
-    pa_ds = dl_tbl.to_pyarrow_dataset(**pyarrow_options)
-    return scan_pyarrow_dataset(pa_ds)
+    if pyarrow_options:
+        pa_ds = dl_tbl.to_pyarrow_dataset(**pyarrow_options)
+        lf = scan_pyarrow_dataset(pa_ds)
+    else:
+        files = dl_tbl.file_uris()
+        if len(files) == 1:
+            lf = scan_parquet(files[0], storage_options=storage_options)
+        else:
+            lf = concat(
+                [scan_parquet(uri, storage_options=storage_options) for uri in files],
+                how="diagonal",
+            )
+    return lf
 
 
 def _resolve_delta_lake_uri(table_uri: str, *, strict: bool = True) -> str:
@@ -294,7 +306,6 @@ def _resolve_delta_lake_uri(table_uri: str, *, strict: bool = True) -> str:
         if parsed_result.scheme == ""
         else table_uri
     )
-
     return resolved_uri
 
 

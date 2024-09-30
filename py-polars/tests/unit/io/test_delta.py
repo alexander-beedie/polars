@@ -32,6 +32,24 @@ def test_scan_delta_version(delta_table_path: Path) -> None:
     df2 = pl.scan_delta(str(delta_table_path), version=1).collect()
 
     assert_frame_not_equal(df1, df2)
+    assert_frame_equal(
+        left=df1,
+        right=pl.DataFrame(
+            {"name": ["Joey", "Ivan"], "age": [14, 32]},
+            schema_overrides={"age": pl.Int32},
+        ),
+    )
+    assert_frame_equal(
+        left=df2,
+        right=pl.DataFrame(
+            {
+                "name": ["Joey", "Ivan", "Joey", "Ivan"],
+                "age": [14, 32, 14, 32],
+                "test": [1, 1, None, None],
+            },
+            schema_overrides={"age": pl.Int32},
+        ),
+    )
 
 
 @pytest.mark.write_disk
