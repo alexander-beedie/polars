@@ -163,6 +163,11 @@ impl Duration {
         Self::try_parse(duration).unwrap()
     }
 
+    /// Parse an ISO8601 duration/interval string into a `Duration`
+    pub fn parse_iso(duration: &str) -> Self {
+        Self::try_parse_iso(duration).unwrap()
+    }
+
     #[doc(hidden)]
     /// Parse SQL-style "interval" string to Duration. Handles verbose
     /// units (such as 'year', 'minutes', etc.) and whitespace, as
@@ -173,6 +178,10 @@ impl Duration {
 
     pub fn try_parse(duration: &str) -> PolarsResult<Self> {
         Self::_parse(duration, false)
+    }
+
+    pub fn try_parse_iso(duration: &str) -> PolarsResult<Self> {
+        Self::_parse_iso(duration)
     }
 
     pub fn try_parse_interval(interval: &str) -> PolarsResult<Self> {
@@ -338,6 +347,111 @@ impl Duration {
             nsecs: nsecs.abs(),
             negative: leading_minus,
             parsed_int,
+        })
+    }
+
+    fn _parse_iso(s: &str) -> PolarsResult<Self> {
+        let negative = s.starts_with('-');
+        let num_minus_signs = s.matches('-').count();
+        if num_minus_signs > 1 || (num_minus_signs == 1 && !negative) {
+            polars_bail!(InvalidOperation: "ISO duration string can only have a single minus sign (at the beginning of the string)");
+        }
+        let mut iter = s.char_indices().peekable();
+        let mut start = 0;
+
+        // skip the '-' char (or leading '+', as allowed by ISO8601-2)
+        if negative {
+            start += 1;
+            iter.next().unwrap();
+        } else if s.starts_with('+') {
+            start += 1;
+            iter.next().unwrap();
+        }
+
+        // check that the duration string starts with a 'P'
+        if let Some((i, ch)) = iter.peek() {
+            if *ch != 'P' {
+                polars_bail!(InvalidOperation: "ISO duration string must start with 'P'; found '{}'", ch);
+            }
+            start = *i + 1;
+            iter.next();
+        }
+
+        // note that the duration units can be non-integer values (eg: "PT0.5H" is equivalent
+        // to "PT30M"); in practice float values are usually only seen in the "S" (secs) unit
+        let mut months = 0.0;
+        let mut weeks = 0.0;
+        let mut days = 0.0;
+        let mut nsecs = 0;
+
+        let mut unit = ' ';
+        let mut in_time_component = false;
+
+        while let Some((i, mut ch)) = iter.next() {
+            if !ch.is_ascii_digit() {
+                let v = &s[start..i];
+
+                // if v.contains('.') {
+                //     v.parse::<f64>()
+                // } else {
+                //     v.parse::<i64>()
+                // }
+
+                let Ok(n) = v.parse::<f64>() else {
+                    polars_bail!(InvalidOperation:
+                        "expected numeric unit value in the ISO duration string, found {}", ch
+                    );
+                };
+
+                loop {
+                    match ch {
+                        c if c.is_ascii_alphabetic() => unit = c,
+                        _ => break,
+                    }
+                    match iter.next() {
+                        Some((i, ch_)) => {
+                            ch = ch_;
+                            start = i
+                        },
+                        None => break,
+                    }
+                }
+                if unit == ' ' {
+                    polars_bail!(
+                        InvalidOperation:
+                        "expected a unit to follow numeric value in ISO duration string '{}'", s
+                    );
+                }
+
+                match unit {
+                    'S' => nsecs += (n * 1_000_000_00.0) as i64,
+                    'M' => {
+                        if in_time_component {
+                            nsecs += (n * 60.0 * 1_000_000_000.0) as i64
+                        } else {
+                            months += n
+                        }
+                    },
+                    'H' => nsecs += (n * 3600.0 * 1_000_000_00.0) as i64,
+                    'T' => in_time_component = true,
+                    'D' => days += n,
+                    'W' => weeks += n,
+                    'Y' => months += n * 12.0,
+                    _ => {
+                        polars_bail!(InvalidOperation: "unit: '{unit}' not supported; expected one of 'Y','M','W','D','H','S'");
+                    },
+                }
+                unit = ' ';
+            }
+        }
+
+        Ok(Duration {
+            nsecs: nsecs.abs(),
+            days: days as i64,
+            weeks: weeks as i64,
+            months: months as i64,
+            negative,
+            parsed_int: false,
         })
     }
 

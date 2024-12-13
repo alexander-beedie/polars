@@ -301,6 +301,14 @@ impl StringNameSpace {
         self.strptime(DataType::Datetime(time_unit, time_zone), options, ambiguous)
     }
 
+    /// Convert a String column into a Duration column.
+    #[cfg(feature = "dtype-duration")]
+    pub fn to_duration(self, time_unit: Option<TimeUnit>) -> Expr {
+        let time_unit = time_unit.unwrap_or(TimeUnit::Nanoseconds);
+        self.0
+            .map_private(StringFunction::ToDuration(DataType::Duration(time_unit)).into())
+    }
+
     /// Convert a String column into a Time column.
     #[cfg(feature = "dtype-time")]
     pub fn to_time(self, options: StrptimeOptions) -> Expr {
