@@ -112,6 +112,8 @@ pub enum StringFunction {
     Split(bool),
     #[cfg(feature = "dtype-decimal")]
     ToDecimal(usize),
+    #[cfg(feature = "dtype-duration")]
+    ToDuration(DataType),
     #[cfg(feature = "nightly")]
     Titlecase,
     Uppercase,
@@ -174,6 +176,8 @@ impl StringFunction {
             Titlecase => mapper.with_same_dtype(),
             #[cfg(feature = "dtype-decimal")]
             ToDecimal(_) => mapper.with_dtype(DataType::Decimal(None, None)),
+            #[cfg(feature = "dtype-duration")]
+            ToDuration(dtype) => mapper.with_dtype(dtype.clone()),
             #[cfg(feature = "string_encoding")]
             HexEncode => mapper.with_same_dtype(),
             #[cfg(feature = "binary_encoding")]
@@ -287,6 +291,8 @@ impl Display for StringFunction {
             Titlecase => "titlecase",
             #[cfg(feature = "dtype-decimal")]
             ToDecimal(_) => "to_decimal",
+            #[cfg(feature = "dtype-duration")]
+            ToDuration(_) => "to_duration",
             Uppercase => "uppercase",
             #[cfg(feature = "string_pad")]
             ZFill => "zfill",
@@ -389,6 +395,10 @@ impl From<StringFunction> for SpecialEq<Arc<dyn ColumnsUdf>> {
             Base64Decode(strict) => map!(strings::base64_decode, strict),
             #[cfg(feature = "dtype-decimal")]
             ToDecimal(infer_len) => map!(strings::to_decimal, infer_len),
+            #[cfg(feature = "dtype-duration")]
+            ToDuration(dtype) => {
+                map_as_slice!(parse_duration, dtype.clone())
+            },
             #[cfg(feature = "extract_jsonpath")]
             JsonDecode {
                 dtype,
