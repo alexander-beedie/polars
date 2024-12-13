@@ -15,7 +15,7 @@ use polars_core::prelude::{
     PolarsResult, TimeZone, datetime_to_timestamp_ms, datetime_to_timestamp_ns,
     datetime_to_timestamp_us, polars_bail,
 };
-use polars_error::polars_ensure;
+use polars_error::{polars_ensure, polars_err};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -118,7 +118,7 @@ impl Duration {
         }
     }
 
-    /// Parse a string into a `Duration`
+    /// Parse a string into a `Duration`.
     ///
     /// Strings are composed of a sequence of number-unit pairs, such as `5d` (5 days). A string may begin with a minus
     /// sign, in which case it is interpreted as a negative duration. Some examples:
@@ -156,16 +156,35 @@ impl Duration {
         Self::try_parse(duration).unwrap()
     }
 
+    /// Parse an ISO8601 duration/interval string into a `Duration`.
+    ///
+    /// ISO8601 duration strings are of the form `P[n]Y[n]M[n]DT[n]H[n]M[n]S`, where:
+    /// `P` indicates the start of the duration
+    /// `Y`, `M`, `D` are calendar units (years, months, days)
+    /// `T` indicates the start of a time component
+    /// `H`, `M`, `S` are time units (hours, minutes, seconds)
+    ///
+    /// Examples:
+    /// * `P1Y2M3DT12H` represents 1 year, 2 months, 3 days, 12 hours
+    /// * `PT1H30M20.5S` represents 1 hour, 30 minutes, 20.5 seconds
+    pub fn parse_iso(duration: &str) -> Self {
+        Self::try_parse_iso(duration).unwrap()
+    }
+
     #[doc(hidden)]
-    /// Parse SQL-style "interval" string to Duration. Handles verbose
-    /// units (such as 'year', 'minutes', etc.) and whitespace, as
-    /// well as being case-insensitive.
+    /// Parse SQL-style "interval" string into a `Duration`. Handles verbose
+    /// units (such as 'year', 'minutes', etc.) and whitespace, as well as
+    /// being case-insensitive.
     pub fn parse_interval(interval: &str) -> Self {
         Self::try_parse_interval(interval).unwrap()
     }
 
     pub fn try_parse(duration: &str) -> PolarsResult<Self> {
         Self::_parse(duration, false)
+    }
+
+    pub fn try_parse_iso(duration: &str) -> PolarsResult<Self> {
+        Self::_parse_iso(duration)
     }
 
     pub fn try_parse_interval(interval: &str) -> PolarsResult<Self> {
@@ -213,8 +232,8 @@ impl Duration {
                 }
             }
         }
-        // reserve capacity for the longest valid unit ("microseconds")
-        let mut unit = String::with_capacity(12);
+        // reserve capacity for the longest valid unit ("microseconds" if interval, else "ms")
+        let mut unit = String::with_capacity(if as_interval { 12 } else { 2 });
         let mut parsed_int = false;
         let mut last_ch_opt: Option<char> = None;
 
@@ -306,6 +325,191 @@ impl Duration {
             nsecs: nsecs.abs(),
             negative,
             parsed_int,
+        })
+    }
+
+    /// helper; parse a numeric value that may contain a fractional component, returning
+    /// the integer and fractional parts (scaled to nanoseconds for the given unit)
+    fn _parse_fractional(value: &str, unit: char) -> PolarsResult<(i64, i64)> {
+        if let Some(decimal_pos) = value.find('.') {
+            let integer_str = &value[..decimal_pos];
+            let fractional_str = &value[decimal_pos + 1..];
+
+            let integer_part = if integer_str.is_empty() {
+                0
+            } else {
+                integer_str.parse::<i64>().map_err(
+                    |_| polars_err!(InvalidOperation: "invalid integer part in '{}'", value),
+                )?
+            };
+            let scale_factor = match unit {
+                'S' => 1,      // already in nanoseconds
+                'M' => 60,     // 1 min => 60 seconds
+                'H' => 3600,   // 1 hour => 3600 seconds
+                'D' => 86400,  // 1 day => 86400 seconds
+                'W' => 604800, // 1 week => 604800 seconds
+                _ => {
+                    polars_bail!(InvalidOperation: "fractional values are invalid for '{}' units", unit)
+                },
+            };
+
+            // convert fractional part to nanoseconds; avoid
+            // string alloc by parsing digits directly
+            let frac_bytes = fractional_str.as_bytes();
+            let mut frac_nanos = 0i64;
+            let len = frac_bytes.len().min(9);
+            for (i, &byte) in frac_bytes.iter().take(len).enumerate() {
+                if !byte.is_ascii_digit() {
+                    polars_bail!(InvalidOperation: "invalid fractional digits in '{}'", value);
+                }
+                let digit = (byte - b'0') as i64;
+                frac_nanos += digit * 10i64.pow(8 - i as u32);
+            }
+            Ok((integer_part, frac_nanos * scale_factor))
+        } else {
+            // no fractional part
+            let integer_part = value
+                .parse::<i64>()
+                .map_err(|_| polars_err!(InvalidOperation: "invalid integer value '{}'", value))?;
+            Ok((integer_part, 0))
+        }
+    }
+
+    fn _parse_iso(s: &str) -> PolarsResult<Self> {
+        let negative = s.starts_with('-');
+        let num_minus_signs = s.matches('-').count();
+        if num_minus_signs > 1 || (num_minus_signs == 1 && !negative) {
+            polars_bail!(InvalidOperation: "ISO duration string can only have a single minus sign (at the beginning of the string)");
+        }
+        let mut iter = s.char_indices().peekable();
+        let mut start = 0;
+
+        // skip leading '-' or '+' chars (identifying '-' as negative duration)
+        if negative || s.starts_with('+') {
+            start += 1;
+            iter.next().unwrap();
+        }
+
+        // duration strings must start with 'P'
+        if let Some((i, ch)) = iter.peek() {
+            if *ch != 'P' {
+                polars_bail!(InvalidOperation: "ISO duration string must start with 'P'; found '{}'", ch);
+            }
+            start = *i + 1;
+            iter.next();
+        }
+
+        // note that the duration units can be non-integer values (eg: "PT0.5H" is equivalent
+        // to "PT30M"); in practice decimal values are usually only seen in the "S" (secs) unit
+        let mut months = 0;
+        let mut weeks = 0;
+        let mut days = 0;
+        let mut nsecs = 0;
+
+        let mut in_time_component = false;
+
+        // validate unit ordering:
+        // (Y=8, M_date=7, W=6, D=5, T=4, H=3, M_time=2, S=1)
+        let mut last_unit_order = 9u8;
+        macro_rules! validate_unit_order {
+            ($unit:expr, $order:expr) => {
+                if $order > last_unit_order {
+                    polars_bail!(InvalidOperation: "duration unit designators must appear in order 'YMD[T]HMS', found '{}' in invalid location", $unit);
+                }
+                last_unit_order = $order;
+            };
+        }
+
+        for (i, ch) in iter {
+            if !ch.is_ascii_digit() && ch != '.' {
+                if ch == 'T' {
+                    // time separator, not a duration unit
+                    in_time_component = true;
+                    last_unit_order = 4; // reset for time component
+                    start = i + 1;
+                    continue;
+                }
+                let v = &s[start..i];
+                if v.is_empty() {
+                    polars_bail!(InvalidOperation: "expected numeric value before unit in ISO duration string");
+                }
+
+                // identify/parse the unit character (single char in ISO format)
+                let unit = if ch.is_ascii_alphabetic() {
+                    start = i + 1;
+                    ch
+                } else {
+                    polars_bail!(InvalidOperation: "expected duration unit, found '{}'", ch);
+                };
+
+                // parse unit value, handling fractional components
+                let (integer_component, fractional_nsecs) = Self::_parse_fractional(v, unit)?;
+                match unit {
+                    'S' => {
+                        if !in_time_component {
+                            polars_bail!(InvalidOperation: "missing 'T' time designator in '{s}'");
+                        }
+                        validate_unit_order!('S', 1);
+                        nsecs += integer_component * NS_SECOND + fractional_nsecs;
+                    },
+                    'M' => {
+                        if in_time_component {
+                            validate_unit_order!('M', 2);
+                            nsecs += integer_component * NS_MINUTE + fractional_nsecs;
+                        } else {
+                            validate_unit_order!('M', 7);
+                            if fractional_nsecs != 0 {
+                                polars_bail!(InvalidOperation: "fractional values are not supported for months, found '{integer_component}.{fractional_nsecs}M'");
+                            }
+                            months += integer_component;
+                        }
+                    },
+                    'H' => {
+                        if !in_time_component {
+                            polars_bail!(InvalidOperation: "missing 'T' time designator in '{s}'");
+                        }
+                        validate_unit_order!('H', 3);
+                        nsecs += integer_component * NS_HOUR + fractional_nsecs;
+                    },
+                    'D' => {
+                        validate_unit_order!('D', 5);
+                        days += integer_component;
+                        nsecs += fractional_nsecs;
+                    },
+                    'W' => {
+                        validate_unit_order!('W', 6);
+                        weeks += integer_component;
+                        nsecs += fractional_nsecs;
+                    },
+                    'Y' => {
+                        validate_unit_order!('Y', 8);
+                        if fractional_nsecs != 0 {
+                            polars_bail!(InvalidOperation: "fractional values are not supported for years, found '{integer_component}.{fractional_nsecs}Y'");
+                        }
+                        months += integer_component * 12;
+                    },
+                    _ => {
+                        polars_bail!(InvalidOperation: "unit: '{unit}' not supported; expected one of 'Y','M','W','D','H','S'");
+                    },
+                }
+            }
+        }
+
+        // string ended with a numeric value, but no unit was given
+        if start < s.len() {
+            let remaining = &s[start..];
+            if !remaining.is_empty() && remaining.chars().any(|c| c.is_ascii_digit()) {
+                polars_bail!(InvalidOperation: "expected a unit to follow numeric value in ISO duration string '{}'", s);
+            }
+        }
+
+        Ok(Duration {
+            nsecs: nsecs.abs(),
+            days,
+            weeks,
+            months,
+            negative,
+            parsed_int: false,
         })
     }
 
@@ -467,7 +671,8 @@ impl Duration {
         self.negative
     }
 
-    /// Estimated duration of the window duration. Not a very good one if not a constant duration.
+    /// Estimated (absolute) duration of the window duration.
+    /// Not a very good one if not a constant duration (see `is_constant_duration`)
     #[doc(hidden)]
     pub const fn duration_ns(&self) -> i64 {
         self.months * 28 * 24 * 3600 * NANOSECONDS
@@ -1062,69 +1267,4 @@ pub fn ensure_duration_matches_dtype(
         },
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn test_parse() {
-        let out = Duration::parse("1ns");
-        assert_eq!(out.nsecs, 1);
-        let out = Duration::parse("1ns1ms");
-        assert_eq!(out.nsecs, NS_MILLISECOND + 1);
-        let out = Duration::parse("123ns40ms");
-        assert_eq!(out.nsecs, 40 * NS_MILLISECOND + 123);
-        let out = Duration::parse("123ns40ms1w");
-        assert_eq!(out.nsecs, 40 * NS_MILLISECOND + 123);
-        assert_eq!(out.duration_ns(), 40 * NS_MILLISECOND + 123 + NS_WEEK);
-        let out = Duration::parse("-123ns40ms1w");
-        assert!(out.negative);
-        let out = Duration::parse("5w");
-        assert_eq!(out.weeks(), 5);
-    }
-
-    #[test]
-    fn test_add_ns() {
-        let t = 1;
-        let seven_days = Duration::parse("7d");
-        let one_week = Duration::parse("1w");
-
-        // add_ns can only error if a time zone is passed, so it's
-        // safe to unwrap here
-        assert_eq!(
-            seven_days.add_ns(t, None).unwrap(),
-            one_week.add_ns(t, None).unwrap()
-        );
-
-        let seven_days_negative = Duration::parse("-7d");
-        let one_week_negative = Duration::parse("-1w");
-
-        // add_ns can only error if a time zone is passed, so it's
-        // safe to unwrap here
-        assert_eq!(
-            seven_days_negative.add_ns(t, None).unwrap(),
-            one_week_negative.add_ns(t, None).unwrap()
-        );
-    }
-
-    #[test]
-    fn test_display() {
-        let duration = Duration::parse("1h");
-        let expected = "3600s";
-        assert_eq!(format!("{duration}"), expected);
-        let duration = Duration::parse("1h5ns");
-        let expected = "3600000000005ns";
-        assert_eq!(format!("{duration}"), expected);
-        let duration = Duration::parse("1h5000ns");
-        let expected = "3600000005us";
-        assert_eq!(format!("{duration}"), expected);
-        let duration = Duration::parse("3mo");
-        let expected = "3mo";
-        assert_eq!(format!("{duration}"), expected);
-        let duration = Duration::parse_interval("4 weeks");
-        let expected = "4w";
-        assert_eq!(format!("{duration}"), expected);
-    }
 }

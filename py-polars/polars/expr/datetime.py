@@ -503,7 +503,7 @@ class ExprDateTimeNameSpace:
         time
             A python time literal or polars expression/column that resolves to a time.
         time_unit : {'ns', 'us', 'ms'}
-            Unit of time.
+            Time unit of the resulting Datetime expression.
 
         Examples
         --------
@@ -556,7 +556,7 @@ class ExprDateTimeNameSpace:
         Convert a Date/Time/Datetime column into a String column with the given format.
 
         .. versionchanged:: 1.15.0
-            Added support for the use of "iso:strict" as a format string.
+            Added support for use of "iso:strict" as a format string.
         .. versionchanged:: 1.14.0
             Added support for the `Duration` dtype, and use of "iso" as a format string.
 
@@ -587,7 +587,7 @@ class ExprDateTimeNameSpace:
         * Duration dtype expressions cannot be formatted with `strftime`. Instead,
           only "iso" and "polars" are supported as format strings. The "iso" format
           string results in ISO8601 duration string output, and "polars" results
-          in the same form seen in the frame `repr`.
+          in the same format seen in the standard frame `repr`.
 
         Examples
         --------

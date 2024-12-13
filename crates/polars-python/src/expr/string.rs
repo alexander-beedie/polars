@@ -61,6 +61,15 @@ impl PyExpr {
             .into()
     }
 
+    #[pyo3(signature = (format, time_unit))]
+    fn str_to_duration(&self, format: String, time_unit: Wrap<TimeUnit>) -> Self {
+        self.inner
+            .clone()
+            .str()
+            .to_duration(&format, time_unit.0)
+            .into()
+    }
+
     #[pyo3(signature = (format, strict, cache))]
     fn str_to_time(&self, format: Option<String>, strict: bool, cache: bool) -> Self {
         let format = format.map(|x| x.into());

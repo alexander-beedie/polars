@@ -101,6 +101,11 @@ pub enum StringFunction {
     Split(bool),
     #[cfg(feature = "dtype-decimal")]
     ToDecimal(usize),
+    #[cfg(feature = "dtype-duration")]
+    ToDuration {
+        format: String,
+        time_unit: TimeUnit,
+    },
     #[cfg(feature = "nightly")]
     Titlecase,
     Uppercase,
@@ -205,6 +210,8 @@ impl Display for StringFunction {
             Titlecase => "titlecase",
             #[cfg(feature = "dtype-decimal")]
             ToDecimal(_) => "to_decimal",
+            #[cfg(feature = "dtype-duration")]
+            ToDuration { .. } => "to_duration",
             Uppercase => "uppercase",
             #[cfg(feature = "string_pad")]
             ZFill => "zfill",

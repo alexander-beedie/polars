@@ -174,6 +174,32 @@ class ExprStringNameSpace:
             )
         )
 
+    # note, this cannot work properly until/unless we have a DurationMonthDayNano dtype
+    # (ref: https://arrow.apache.org/docs/python/generated/pyarrow.month_day_nano_interval.html#pyarrow.month_day_nano_interval)
+    def to_duration(self, format: str = "iso", *, time_unit: TimeUnit = "us") -> Expr:
+        """
+        Convert a String column into a Duration column.
+
+        Parameters
+        ----------
+        format : {'iso', 'polars'}
+            The format to use for conversion, either 'iso' or 'polars'; the former will
+            parse the given string as an ISO 8601 duration, and the latter corresponds
+            to the Polars duration format (as seen in the table `repr`) that is also
+            available from `dt.to_string('polars')` on Duration dtype columns.
+        time_unit : {'ms', 'us', 'ns'}
+            Time unit for the resulting Duration column; if set to None (default),
+            the time unit is inferred from the format string.
+
+        Examples
+        --------
+        ...
+        """
+        if not time_unit:
+            msg = f"`time_unit` must be one of {'ms', 'us', 'ns'}; found {time_unit!r}"
+            raise ValueError(msg)
+        return wrap_expr(self._pyexpr.str_to_duration(format, time_unit))
+
     def to_time(
         self,
         format: str | None = None,

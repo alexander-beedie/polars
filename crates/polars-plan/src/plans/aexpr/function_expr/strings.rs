@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use arrow::legacy::utils::CustomIterTools;
+use polars_core::datatypes::TimeUnit;
 use polars_core::utils::handle_casting_failures;
 #[cfg(feature = "dtype-struct")]
 use polars_utils::format_pl_smallstr;
@@ -113,6 +114,11 @@ pub enum IRStringFunction {
     Split(bool),
     #[cfg(feature = "dtype-decimal")]
     ToDecimal(usize),
+    #[cfg(feature = "dtype-duration")]
+    ToDuration {
+        format: String,
+        time_unit: TimeUnit,
+    },
     #[cfg(feature = "nightly")]
     Titlecase,
     Uppercase,
@@ -191,6 +197,11 @@ impl IRStringFunction {
             Titlecase => mapper.with_same_dtype(),
             #[cfg(feature = "dtype-decimal")]
             ToDecimal(_) => mapper.with_dtype(DataType::Decimal(None, None)),
+            #[cfg(feature = "dtype-duration")]
+            ToDuration {
+                format: _,
+                time_unit,
+            } => mapper.with_dtype(DataType::Duration(*time_unit)),
             #[cfg(feature = "string_encoding")]
             HexEncode => mapper.with_same_dtype(),
             #[cfg(feature = "binary_encoding")]
@@ -276,6 +287,8 @@ impl IRStringFunction {
             S::Titlecase => FunctionOptions::elementwise(),
             #[cfg(feature = "dtype-decimal")]
             S::ToDecimal(_) => FunctionOptions::elementwise_with_infer(),
+            #[cfg(feature = "dtype-duration")]
+            S::ToDuration { .. } => FunctionOptions::elementwise(),
             #[cfg(feature = "string_encoding")]
             S::HexEncode | S::Base64Encode => FunctionOptions::elementwise(),
             #[cfg(feature = "binary_encoding")]
@@ -386,6 +399,8 @@ impl Display for IRStringFunction {
             Titlecase => "titlecase",
             #[cfg(feature = "dtype-decimal")]
             ToDecimal(_) => "to_decimal",
+            #[cfg(feature = "dtype-duration")]
+            ToDuration { .. } => "to_duration",
             Uppercase => "uppercase",
             #[cfg(feature = "string_pad")]
             ZFill => "zfill",
@@ -492,6 +507,8 @@ impl From<IRStringFunction> for SpecialEq<Arc<dyn ColumnsUdf>> {
             Base64Decode(strict) => map!(strings::base64_decode, strict),
             #[cfg(feature = "dtype-decimal")]
             ToDecimal(infer_len) => map!(strings::to_decimal, infer_len),
+            #[cfg(feature = "dtype-duration")]
+            ToDuration { format, time_unit } => map!(strings::to_duration, &format, time_unit),
             #[cfg(feature = "extract_jsonpath")]
             JsonDecode {
                 dtype,
@@ -1206,6 +1223,30 @@ pub(super) fn base64_decode(s: &Column, strict: bool) -> PolarsResult<Column> {
 pub(super) fn to_decimal(s: &Column, infer_len: usize) -> PolarsResult<Column> {
     let ca = s.str()?;
     ca.to_decimal(infer_len).map(Column::from)
+}
+
+#[cfg(feature = "dtype-duration")]
+pub(super) fn to_duration(s: &Column, format: &str, time_unit: TimeUnit) -> PolarsResult<Column> {
+    // ----------------------------------------------------------------------------------
+    // note, this cannot work properly until/unless we have a DurationMonthDayNano dtype
+    // (the below is a work-in-progress implementation that *approximates* the right
+    // answer and can quickly be brought up to speed once the necessary dtype exists)
+    // ----------------------------------------------------------------------------------
+    let ca = s.str()?;
+    let parsed: PolarsResult<Int64Chunked> = ca.try_apply_nonnull_values_generic(|s| {
+        let duration = match format {
+            "iso" => Duration::try_parse_iso(s),
+            "polars" => Duration::try_parse(s),
+            _ => polars_bail!(InvalidOperation: "format must be either 'iso' or 'polars', got '{}'", format),
+        }?;
+        Ok(match time_unit {
+            TimeUnit::Nanoseconds => duration.duration_ns(),
+            TimeUnit::Microseconds => duration.duration_us(),
+            TimeUnit::Milliseconds => duration.duration_ms(),
+        })
+    });
+    let result = parsed?;
+    Ok(result.into_duration(time_unit).into_column())
 }
 
 #[cfg(feature = "extract_jsonpath")]

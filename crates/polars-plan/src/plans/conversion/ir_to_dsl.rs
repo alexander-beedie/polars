@@ -457,6 +457,8 @@ pub fn ir_function_to_dsl(input: Vec<Expr>, function: IRFunctionExpr) -> Expr {
                 IB::Split(v) => B::Split(v),
                 #[cfg(feature = "dtype-decimal")]
                 IB::ToDecimal(v) => B::ToDecimal(v),
+                #[cfg(feature = "dtype-duration")]
+                IB::ToDuration { format, time_unit } => B::ToDuration { format, time_unit },
                 #[cfg(feature = "nightly")]
                 IB::Titlecase => B::Titlecase,
                 IB::Uppercase => B::Uppercase,

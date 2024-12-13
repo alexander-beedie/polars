@@ -295,6 +295,15 @@ impl StringNameSpace {
         self.strptime(DataType::Datetime(time_unit, time_zone), options, ambiguous)
     }
 
+    /// Convert a String column into a Duration column.
+    #[cfg(feature = "dtype-duration")]
+    pub fn to_duration(self, format: &str, time_unit: TimeUnit) -> Expr {
+        self.0.map_unary(StringFunction::ToDuration {
+            format: format.to_string(),
+            time_unit,
+        })
+    }
+
     /// Convert a String column into a Time column.
     #[cfg(feature = "dtype-time")]
     pub fn to_time(self, options: StrptimeOptions) -> Expr {
