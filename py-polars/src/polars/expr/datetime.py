@@ -562,7 +562,7 @@ class ExprDateTimeNameSpace:
         Convert a Date/Time/Datetime column into a String column with the given format.
 
         .. versionchanged:: 1.15.0
-            Added support for the use of "iso:strict" as a format string.
+            Added support for use of "iso:strict" as a format string.
         .. versionchanged:: 1.14.0
             Added support for the `Duration` dtype, and use of "iso" as a format string.
 

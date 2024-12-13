@@ -178,6 +178,34 @@ class ExprStringNameSpace:
             )
         )
 
+    def to_duration(self, format: str | None = None, *, time_unit: TimeUnit | None = None) -> Expr:
+        """
+        Convert a String column into a Duration column.
+
+        Parameters
+        ----------
+        format : {'iso', 'polars'}
+            The format to use for conversion, either 'iso' or 'polars'; the former will
+            parse the given string as an ISO 8601 duration, and the latter corresponds
+            to the Polars duration format seen in the table `repr` that is available
+            from `dt.to_string('polars')` on Duration columns.
+        time_unit : {None, 'us', 'ns', 'ms'}
+            Unit of time for the resulting Duration column.
+
+        Examples
+        --------
+        >>> s = pl.Series(["1s", "2s", "3s"])
+        >>> s.str.to_duration()
+        shape: (3,)
+        Series: '' [duration[μs]]
+        [
+                1s
+                2s
+                3s
+        ]
+        """
+        return wrap_expr(self._pyexpr.str_to_duration(format, time_unit))
+
     def to_time(
         self,
         format: str | None = None,
