@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import polars._reexport as pl
 from polars import functions as F
@@ -40,6 +40,38 @@ class ExprStringNameSpace:
 
     def __init__(self, expr: Expr) -> None:
         self._pyexpr = expr._pyexpr
+
+    def __getitem__(self, item: Any) -> Expr:
+        if isinstance(item, slice):
+            # implement `gather_every` for strings?
+            if item.step is not None:
+                msg = f"`step` is unsupported on namespace slice; found step={item.step!r}"
+                raise ValueError(msg)
+
+            # only supporting integer-based slicing on the namespace, as there are
+            # plenty of edge-cases converting from `start:stop` to `start:length`
+            for value, name in (
+                (start := item.start or 0, "start"),
+                (stop := item.stop, "stop"),
+            ):
+                if value is not None and not isinstance(value, int):
+                    msg = f"{name} must be an integer; found {name}={value!r}, type={type(value)}"
+                    raise TypeError(msg)
+
+            if stop is None:
+                length = None
+            else:
+                if (start or 0) < 0:
+                    length = self.len_chars() stop - start
+                length = stop - start
+
+            return self.slice(start, length)
+
+        elif isinstance(item, int):
+            return self.slice(item, length=1)
+
+        msg = f"{item!r} is not valid for indexing into the `{self._accessor}` namespace"
+        raise TypeError(msg)
 
     def to_date(
         self,
@@ -2152,7 +2184,9 @@ class ExprStringNameSpace:
         return wrap_expr(self._pyexpr.str_reverse())
 
     def slice(
-        self, offset: int | IntoExprColumn, length: int | IntoExprColumn | None = None
+        self,
+        offset: int | IntoExprColumn | None,
+        length: int | IntoExprColumn | None = None,
     ) -> Expr:
         """
         Extract a substring from each string value.
@@ -2210,7 +2244,7 @@ class ExprStringNameSpace:
         │ dragonfruit ┆ onf   │
         └─────────────┴───────┘
         """
-        offset = parse_into_expression(offset)
+        offset = parse_into_expression(0 if offset is None else offset)
         length = parse_into_expression(length)
         return wrap_expr(self._pyexpr.str_slice(offset, length))
 
