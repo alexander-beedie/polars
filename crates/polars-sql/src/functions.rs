@@ -340,6 +340,13 @@ pub(crate) enum PolarsSQLFunctions {
     /// SELECT DATE('2021-03', '%Y-%m') FROM df;
     /// ```
     Date,
+    /// SQL 'encode' function.
+    /// Returns the string encoded using a 'hex' or 'base64' representation.
+    /// ```sql
+    /// SELECT ENCODE(column_1, 'hex') FROM df;
+    /// SELECT ENCODE(column_1, 'base64') FROM df;
+    /// ```
+    Encode,
     /// SQL 'ends_with' function.
     /// Returns True if the value ends with the second argument.
     /// ```sql
@@ -966,7 +973,8 @@ impl PolarsSQLFunctions {
             "concat" => Self::Concat,
             "concat_ws" => Self::ConcatWS,
             "date" => Self::Date,
-            "timestamp" | "datetime" => Self::Timestamp,
+            "datetime" | "timestamp" => Self::Timestamp,
+            "encode" => Self::Encode,
             "ends_with" => Self::EndsWith,
             #[cfg(feature = "nightly")]
             "initcap" => Self::InitCap,
@@ -1252,6 +1260,32 @@ impl SQLFunctionVisitor<'_> {
                     2 => self.visit_binary(|e, fmt| e.str().to_date(fmt)),
                     _ => {
                         polars_bail!(SQLSyntax: "DATE expects 1-2 arguments (found {})", args.len())
+                    },
+                }
+            },
+            Encode => {
+                let args = extract_args(function)?;
+                match args.len() {
+                    2 => self.try_visit_binary(|e, encoding| {
+                        Ok(match encoding {
+                            Expr::Literal(ref lv) if lv.extract_str().is_some() => {
+                                match lv.extract_str().unwrap().to_lowercase().as_str() {
+                                    "base64" => e.str().base64_encode(),
+                                    "hex" => e.str().hex_encode(),
+                                    encoding_type => polars_bail!(
+                                        SQLSyntax: "{:?} is not a valid encoding (expect 'base64' or 'hex')",
+                                        encoding_type
+                                    ),
+                                }
+                            }
+                            _ => polars_bail!(
+                                SQLSyntax: "{:?} is not a valid encoding (expect 'base64' or 'hex')",
+                                encoding
+                            ),
+                        })
+                    }),
+                    _ => {
+                        polars_bail!(SQLSyntax: "ENCODE expects 2 arguments (found {})", args.len())
                     },
                 }
             },

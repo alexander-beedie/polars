@@ -15,6 +15,8 @@ String
      - Returns all input expressions concatenated together (and interleaved with a separator) as a string.
    * - :ref:`DATE <date>`
      - Converts a formatted date string to an actual Date value.
+   * - :ref:`ENCODE <encode>`
+     - Encodes a string expression as 'hex' or 'base64'.
    * - :ref:`ENDS_WITH <ends_with>`
      - Returns True if the value ends with the second argument.
    * - :ref:`INITCAP <initcap>`
@@ -54,7 +56,7 @@ String
      - Converts a string to a Datetime using a strftime-compatible formatting string.
    * - :ref:`SUBSTR <substr>`, :ref:`SUBSTRING <substring>`
      - Returns a slice of the string data (from a start index, with an optional length); note that `start` is 1-indexed.
-   * - :ref:`TIMESTAMP <timestamp>`
+   * - :ref:`TIMESTAMP <timestamp>` (or `DATETIME`)
      - Converts a formatted timestamp/datetime string to an actual Datetime value.
    * - :ref:`UPPER <upper>`
      - Returns an uppercased column.
@@ -188,6 +190,33 @@ unless a strftime-compatible formatting string is provided as the second paramet
     # │ 2024-07-05 ┆ 2077-07-05 │
     # │ 2077-02-28 ┆ 2000-04-28 │
     # └────────────┴────────────┘
+
+.. _encode:
+
+ENCODE
+------
+Encodes a string expression as 'hex' or 'base64'.
+
+**Example:**
+
+.. code-block:: python
+
+    df = pl.DataFrame({"s": ["Hello", "World"]})
+    df.sql("""
+      SELECT s,
+        ENCODE(s, 'base64') AS "s:b64",
+        ENCODE(s, 'hex') AS "s:hex",
+      FROM self
+    """)
+    # shape: (2, 3)
+    # ┌───────┬──────────┬────────────┐
+    # │ s     ┆ s:b64    ┆ s:hex      │
+    # │ ---   ┆ ---      ┆ ---        │
+    # │ str   ┆ str      ┆ str        │
+    # ╞═══════╪══════════╪════════════╡
+    # │ Hello ┆ SGVsbG8= ┆ 48656c6c6f │
+    # │ World ┆ V29ybGQ= ┆ 576f726c64 │
+    # └───────┴──────────┴────────────┘
 
 .. _ends_with:
 

@@ -131,7 +131,11 @@ impl SQLExprVisitor<'_> {
                 expr,
             } => parse_extract_date_part(self.visit_expr(expr)?, field),
             SQLExpr::Floor { expr, .. } => Ok(self.visit_expr(expr)?.floor()),
+            // -----------------------------------------------------------------------------
+            // functions that don't require any special syntax parsing are handled in here.
+            // these are functions that just take a list of arguments, eg: "FUNC(a,b,c)"
             SQLExpr::Function(function) => self.visit_function(function),
+            // -----------------------------------------------------------------------------
             SQLExpr::Identifier(ident) => self.visit_identifier(ident),
             SQLExpr::InList {
                 expr,

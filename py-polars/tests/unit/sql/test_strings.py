@@ -83,6 +83,29 @@ def test_string_concat_errors(invalid_concat: str) -> None:
         pl.SQLContext(data=lf).execute(f"SELECT {invalid_concat} FROM data")
 
 
+def test_string_encode() -> None:
+    df = pl.DataFrame({"s": ["Hello", "World"]})
+    res = df.sql(
+        """
+        SELECT
+          s,
+          ENCODE(s, 'base64') AS "s:b64",
+          ENCODE(s, 'hex') AS "s:hex",
+        FROM self
+        """
+    )
+    assert res.to_dict(as_series=False) == {
+        "s": ["Hello", "World"],
+        "s:b64": ["SGVsbG8=", "V29ybGQ="],
+        "s:hex": ["48656c6c6f", "576f726c64"],
+    }
+    with pytest.raises(
+        SQLSyntaxError,
+        match=r'"base2048" is not a valid encoding \(expect \'base64\' or \'hex\'\)',
+    ):
+        df.sql("SELECT ENCODE(s, 'base2048') FROM self")
+
+
 def test_string_left_right_reverse() -> None:
     df = pl.DataFrame({"txt": ["abcde", "abc", "a", None]})
     ctx = pl.SQLContext(df=df)
