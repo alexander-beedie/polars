@@ -7738,21 +7738,21 @@ class Series:
         """Perform an aggregation of bitwise XORs."""
         return self._s.bitwise_xor()
 
-    def first(self) -> PythonLiteral | None:
+    def first(self, *, ignore_nulls: bool = False) -> PythonLiteral | None:
         """
         Get the first element of the Series.
 
         Returns `None` if the Series is empty.
         """
-        return self._s.first()
+        return self._s.first(ignore_nulls=ignore_nulls)
 
-    def last(self) -> PythonLiteral | None:
+    def last(self, *, ignore_nulls: bool = False) -> PythonLiteral | None:
         """
         Get the last element of the Series.
 
         Returns `None` if the Series is empty.
         """
-        return self._s.last()
+        return self._s.last(ignore_nulls=ignore_nulls)
 
     def approx_n_unique(self) -> PythonLiteral | None:
         """

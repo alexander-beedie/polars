@@ -3385,7 +3385,7 @@ class Expr:
             return self._from_pyexpr(self._pyexpr.unique_stable())
         return self._from_pyexpr(self._pyexpr.unique())
 
-    def first(self) -> Expr:
+    def first(self, *, ignore_nulls: bool = False) -> Expr:
         """
         Get the first value.
 
@@ -3402,9 +3402,9 @@ class Expr:
         │ 1   │
         └─────┘
         """
-        return self._from_pyexpr(self._pyexpr.first())
+        return self._from_pyexpr(self._pyexpr.first(ignore_nulls=ignore_nulls))
 
-    def last(self) -> Expr:
+    def last(self, *, ignore_nulls: bool = False) -> Expr:
         """
         Get the last value.
 
@@ -3421,7 +3421,7 @@ class Expr:
         │ 2   │
         └─────┘
         """
-        return self._from_pyexpr(self._pyexpr.last())
+        return self._from_pyexpr(self._pyexpr.last(ignore_nulls=ignore_nulls))
 
     def over(
         self,

@@ -191,14 +191,13 @@ impl PartitionedColumn {
         // @TODO: IdxSize checks
         let new_length = (self.len() + n) as IdxSize;
 
-        let values = if !self.is_empty() && self.values.last().value() == &value {
+        let values = if !self.is_empty() && self.values.last(false).value() == &value {
             *new_ends.last_mut().unwrap() = new_length;
             self.values.clone()
         } else {
             new_ends.push(new_length);
             self.values.extend_constant(value, 1)?
         };
-
         Ok(unsafe { Self::new_unchecked(self.name.clone(), values, new_ends.into()) })
     }
 

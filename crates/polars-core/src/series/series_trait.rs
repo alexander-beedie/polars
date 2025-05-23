@@ -10,6 +10,7 @@ use crate::chunked_array::cast::CastOptions;
 #[cfg(feature = "object")]
 use crate::chunked_array::object::PolarsObjectSafe;
 use crate::prelude::*;
+use crate::utils::{first_non_null, last_non_null};
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -541,25 +542,44 @@ pub trait SeriesTrait:
     /// Get the first element of the [`Series`] as a [`Scalar`]
     ///
     /// If the [`Series`] is empty, a [`Scalar`] with a [`AnyValue::Null`] is returned.
-    fn first(&self) -> Scalar {
+    fn first(&self, ignore_nulls: bool) -> Scalar {
         let dt = self.dtype();
-        let av = self.get(0).map_or(AnyValue::Null, AnyValue::into_static);
-
+        if self.len() == 0 {
+            return Scalar::new(dt.clone(), AnyValue::Null);
+        }
+        let mut first_idx = 0;
+        if ignore_nulls {
+            let idx_not_null = first_non_null(self.chunks().iter().map(|c| c.validity()));
+            if idx_not_null.is_none() {
+                return Scalar::new(dt.clone(), AnyValue::Null);
+            }
+            first_idx = idx_not_null.unwrap();
+        }
+        let av = self
+            .get(first_idx)
+            .map_or(AnyValue::Null, AnyValue::into_static);
         Scalar::new(dt.clone(), av)
     }
 
     /// Get the last element of the [`Series`] as a [`Scalar`]
     ///
     /// If the [`Series`] is empty, a [`Scalar`] with a [`AnyValue::Null`] is returned.
-    fn last(&self) -> Scalar {
+    fn last(&self, ignore_nulls: bool) -> Scalar {
         let dt = self.dtype();
-        let av = if self.len() == 0 {
-            AnyValue::Null
-        } else {
-            // SAFETY: len-1 < len if len != 0
-            unsafe { self.get_unchecked(self.len() - 1) }.into_static()
-        };
-
+        let n_values = self.len();
+        if n_values == 0 {
+            return Scalar::new(dt.clone(), AnyValue::Null);
+        }
+        let mut last_idx = n_values - 1;
+        if ignore_nulls {
+            let idx_not_null = last_non_null(self.chunks().iter().map(|c| c.validity()), n_values);
+            if idx_not_null.is_none() {
+                return Scalar::new(dt.clone(), AnyValue::Null);
+            }
+            last_idx = idx_not_null.unwrap();
+        }
+        // SAFETY: len-1 < len if len != 0
+        let av = unsafe { self.get_unchecked(last_idx) }.into_static();
         Scalar::new(dt.clone(), av)
     }
 
