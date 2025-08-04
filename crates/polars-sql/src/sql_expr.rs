@@ -21,7 +21,8 @@ use serde::{Deserialize, Serialize};
 use sqlparser::ast::{
     BinaryOperator as SQLBinaryOperator, CastFormat, CastKind, DataType as SQLDataType,
     DateTimeField, Expr as SQLExpr, Function as SQLFunction, Ident, Interval, Query as Subquery,
-    SelectItem, Subscript, TimezoneInfo, TrimWhereField, UnaryOperator, Value as SQLValue,
+    SelectItem, Subscript, TimezoneInfo, TrimWhereField, UnaryOperator as SQLUnaryOperator,
+    Value as SQLValue,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::{Parser, ParserOptions};
@@ -513,27 +514,32 @@ impl SQLExprVisitor<'_> {
             SQLBinaryOperator::Xor => lhs.xor(rhs),  // "x XOR y"
 
             // ----
-            // General operators
+            // Comparison operators
             // ----
-            SQLBinaryOperator::And => lhs.and(rhs),  // "x AND y"
-            SQLBinaryOperator::Divide => lhs / rhs,  // "x / y"
-            SQLBinaryOperator::DuckIntegerDivide => lhs.floor_div(rhs).cast(DataType::Int64),  // "x // y"
             SQLBinaryOperator::Eq => lhs.eq(rhs),  // "x = y"
             SQLBinaryOperator::Gt => lhs.gt(rhs),  // "x > y"
             SQLBinaryOperator::GtEq => lhs.gt_eq(rhs),  // "x >= y"
             SQLBinaryOperator::Lt => lhs.lt(rhs),  // "x < y"
             SQLBinaryOperator::LtEq => lhs.lt_eq(rhs),  // "x <= y"
+            SQLBinaryOperator::NotEq => lhs.eq(rhs).not(),  // "x != y"
+            SQLBinaryOperator::Spaceship => lhs.eq_missing(rhs),  // "x <=> y"
+
+            // ----
+            // Logical operators
+            // ----
+            SQLBinaryOperator::And => lhs.and(rhs),  // "x AND y"
+            SQLBinaryOperator::Or => lhs.or(rhs),  // "x OR y"
+
+            // ----
+            // Mathematical operators
+            // ----
+            SQLBinaryOperator::Divide => lhs / rhs,  // "x / y"
+            SQLBinaryOperator::DuckIntegerDivide => lhs.floor_div(rhs).cast(DataType::Int64),  // "x // y"
             SQLBinaryOperator::Minus => lhs - rhs,  // "x - y"
             SQLBinaryOperator::Modulo => lhs % rhs,  // "x % y"
             SQLBinaryOperator::Multiply => lhs * rhs,  // "x * y"
-            SQLBinaryOperator::NotEq => lhs.eq(rhs).not(),  // "x != y"
-            SQLBinaryOperator::Or => lhs.or(rhs),  // "x OR y"
             SQLBinaryOperator::Plus => lhs + rhs,  // "x + y"
-            SQLBinaryOperator::Spaceship => lhs.eq_missing(rhs),  // "x <=> y"
-            SQLBinaryOperator::StringConcat => {  // "x || y"
-                lhs.cast(DataType::String) + rhs.cast(DataType::String)
-            },
-            SQLBinaryOperator::PGStartsWith => lhs.str().starts_with(rhs),  // "x ^@ y"
+
             // ----
             // Regular expression operators
             // ----
@@ -591,7 +597,14 @@ impl SQLExprVisitor<'_> {
                 self.visit_expr(&expr)?
             },
             // ----
-            // JSON/Struct field access operators
+            // String operators
+            // ----
+            SQLBinaryOperator::PGStartsWith => lhs.str().starts_with(rhs),  // "x ^@ y"
+            SQLBinaryOperator::StringConcat => {  // "x || y"
+                lhs.cast(DataType::String) + rhs.cast(DataType::String)
+            },
+            // ----
+            // Nested (JSON) field access operators
             // ----
             SQLBinaryOperator::Arrow | SQLBinaryOperator::LongArrow => match rhs {  // "x -> y", "x ->> y"
                 Expr::Literal(lv) if lv.extract_str().is_some() => {
@@ -637,26 +650,29 @@ impl SQLExprVisitor<'_> {
     /// Visit a SQL unary operator.
     ///
     /// e.g. +column or -column
-    fn visit_unary_op(&mut self, op: &UnaryOperator, expr: &SQLExpr) -> PolarsResult<Expr> {
+    fn visit_unary_op(&mut self, op: &SQLUnaryOperator, expr: &SQLExpr) -> PolarsResult<Expr> {
         let expr = self.visit_expr(expr)?;
         Ok(match (op, expr.clone()) {
             // simplify the parse tree by special-casing common unary +/- ops
-            (UnaryOperator::Plus, Expr::Literal(LiteralValue::Dyn(DynLiteralValue::Int(n)))) => {
+            (SQLUnaryOperator::Plus, Expr::Literal(LiteralValue::Dyn(DynLiteralValue::Int(n)))) => {
                 lit(n)
             },
-            (UnaryOperator::Plus, Expr::Literal(LiteralValue::Dyn(DynLiteralValue::Float(n)))) => {
-                lit(n)
-            },
-            (UnaryOperator::Minus, Expr::Literal(LiteralValue::Dyn(DynLiteralValue::Int(n)))) => {
-                lit(-n)
-            },
-            (UnaryOperator::Minus, Expr::Literal(LiteralValue::Dyn(DynLiteralValue::Float(n)))) => {
-                lit(-n)
-            },
+            (
+                SQLUnaryOperator::Plus,
+                Expr::Literal(LiteralValue::Dyn(DynLiteralValue::Float(n))),
+            ) => lit(n),
+            (
+                SQLUnaryOperator::Minus,
+                Expr::Literal(LiteralValue::Dyn(DynLiteralValue::Int(n))),
+            ) => lit(-n),
+            (
+                SQLUnaryOperator::Minus,
+                Expr::Literal(LiteralValue::Dyn(DynLiteralValue::Float(n))),
+            ) => lit(-n),
             // general case
-            (UnaryOperator::Plus, _) => lit(0) + expr,
-            (UnaryOperator::Minus, _) => lit(0) - expr,
-            (UnaryOperator::Not, _) => expr.not(),
+            (SQLUnaryOperator::Plus, _) => lit(0) + expr,
+            (SQLUnaryOperator::Minus, _) => lit(0) - expr,
+            (SQLUnaryOperator::Not, _) => expr.not(),
             other => polars_bail!(SQLInterface: "unary operator {:?} is not supported", other),
         })
     }
@@ -829,7 +845,7 @@ impl SQLExprVisitor<'_> {
     fn visit_any_value(
         &self,
         value: &SQLValue,
-        op: Option<&UnaryOperator>,
+        op: Option<&SQLUnaryOperator>,
     ) -> PolarsResult<AnyValue<'_>> {
         Ok(match value {
             SQLValue::Boolean(b) => AnyValue::Boolean(*b),
@@ -844,9 +860,9 @@ impl SQLExprVisitor<'_> {
             SQLValue::Null => AnyValue::Null,
             SQLValue::Number(s, _) => {
                 let negate = match op {
-                    Some(UnaryOperator::Minus) => true,
+                    Some(SQLUnaryOperator::Minus) => true,
                     // no op should be taken as plus.
-                    Some(UnaryOperator::Plus) | None => false,
+                    Some(SQLUnaryOperator::Plus) | None => false,
                     Some(op) => {
                         polars_bail!(SQLInterface: "unary op {:?} not supported for numeric SQL value", op)
                     },

@@ -1,5 +1,5 @@
-SQL Clauses
-===========
+Query Clauses
+=============
 
 .. list-table::
    :header-rows: 1

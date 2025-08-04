@@ -9,11 +9,11 @@ use polars_plan::dsl::function_expr::StructFunction;
 use polars_plan::prelude::*;
 use polars_utils::format_pl_smallstr;
 use sqlparser::ast::{
-    BinaryOperator, CreateTable, Delete, Distinct, ExcludeSelectItem, Expr as SQLExpr, FromTable,
-    FunctionArg, GroupByExpr, Ident, JoinConstraint, JoinOperator, ObjectName, ObjectType, Offset,
-    OrderBy, Query, RenameSelectItem, Select, SelectItem, SetExpr, SetOperator, SetQuantifier,
-    Statement, TableAlias, TableFactor, TableWithJoins, UnaryOperator, Value as SQLValue, Values,
-    WildcardAdditionalOptions,
+    BinaryOperator as SQLBinaryOperator, CreateTable, Delete, Distinct, ExcludeSelectItem,
+    Expr as SQLExpr, FromTable, FunctionArg, GroupByExpr, Ident, JoinConstraint, JoinOperator,
+    ObjectName, ObjectType, Offset, OrderBy, Query, RenameSelectItem, Select, SelectItem, SetExpr,
+    SetOperator, SetQuantifier, Statement, TableAlias, TableFactor, TableWithJoins,
+    UnaryOperator as SQLUnaryOperator, Value as SQLValue, Values, WildcardAdditionalOptions,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::{Parser, ParserOptions};
@@ -244,7 +244,7 @@ impl SQLContext {
     ) -> PolarsResult<Expr> {
         match e {
             SQLExpr::UnaryOp {
-                op: UnaryOperator::Minus,
+                op: SQLUnaryOperator::Minus,
                 expr,
             } if matches!(**expr, SQLExpr::Value(SQLValue::Number(_, _))) => {
                 if let SQLExpr::Value(SQLValue::Number(ref idx, _)) = **expr {
@@ -994,8 +994,10 @@ impl SQLContext {
             let (all_true, all_false) = match expr {
                 SQLExpr::Value(SQLValue::Boolean(b)) => (*b, !*b),
                 SQLExpr::BinaryOp { left, op, right } => match (&**left, &**right, op) {
-                    (SQLExpr::Value(a), SQLExpr::Value(b), BinaryOperator::Eq) => (a == b, a != b),
-                    (SQLExpr::Value(a), SQLExpr::Value(b), BinaryOperator::NotEq) => {
+                    (SQLExpr::Value(a), SQLExpr::Value(b), SQLBinaryOperator::Eq) => {
+                        (a == b, a != b)
+                    },
+                    (SQLExpr::Value(a), SQLExpr::Value(b), SQLBinaryOperator::NotEq) => {
                         (a != b, a == b)
                     },
                     _ => (false, false),
@@ -1614,14 +1616,14 @@ fn process_join_on(
 ) -> PolarsResult<(Vec<Expr>, Vec<Expr>)> {
     match expression {
         SQLExpr::BinaryOp { left, op, right } => match op {
-            BinaryOperator::And => {
+            SQLBinaryOperator::And => {
                 let (mut left_i, mut right_i) = process_join_on(left, tbl_left, tbl_right)?;
                 let (mut left_j, mut right_j) = process_join_on(right, tbl_left, tbl_right)?;
                 left_i.append(&mut left_j);
                 right_i.append(&mut right_j);
                 Ok((left_i, right_i))
             },
-            BinaryOperator::Eq => match (left.as_ref(), right.as_ref()) {
+            SQLBinaryOperator::Eq => match (left.as_ref(), right.as_ref()) {
                 (SQLExpr::CompoundIdentifier(left), SQLExpr::CompoundIdentifier(right)) => {
                     collect_compound_identifiers(left, right, &tbl_left.name, &tbl_right.name)
                 },
