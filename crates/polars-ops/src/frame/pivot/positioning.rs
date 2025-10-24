@@ -227,14 +227,60 @@ where
     out
 }
 
+fn compute_col_idx_with_filter(
+    column_agg_str: &StringChunked,
+    value_to_idx: &PlHashMap<String, IdxSize>,
+) -> Vec<Option<IdxSize>> {
+    column_agg_str
+        .iter()
+        .map(|opt_v| match opt_v {
+            Some(v) => value_to_idx.get(v).copied(),
+            None => value_to_idx.get("null").copied(),
+        })
+        .collect()
+}
+
 pub(super) fn compute_col_idx(
     pivot_df: &DataFrame,
     column: &str,
     groups: &GroupsType,
-) -> PolarsResult<(Vec<IdxSize>, Column)> {
+    on_columns: Option<&[String]>,
+) -> PolarsResult<(Vec<IdxSize>, Column, Option<Vec<bool>>)> {
     let column_s = pivot_df.column(column)?;
     let column_agg = unsafe { column_s.agg_first(groups) };
     let column_agg_physical = column_agg.to_physical_repr();
+
+    // If on_columns is provided, use filtering logic
+    if let Some(on_columns) = on_columns {
+        let column_agg_str = column_agg.cast(&DataType::String)?;
+        let column_agg_str = column_agg_str.str().unwrap();
+
+        // Create mapping from value string to column index
+        let mut value_to_idx = PlHashMap::with_capacity(on_columns.len());
+        for (idx, val) in on_columns.iter().enumerate() {
+            value_to_idx.insert(val.clone(), idx as IdxSize);
+        }
+
+        let col_opt_locations = compute_col_idx_with_filter(column_agg_str, &value_to_idx);
+
+        // Build col_locations and mask
+        let mut col_locations = Vec::with_capacity(col_opt_locations.len());
+        let mut mask = Vec::with_capacity(col_opt_locations.len());
+        for opt_idx in col_opt_locations {
+            match opt_idx {
+                Some(idx) => {
+                    col_locations.push(idx);
+                    mask.push(true);
+                },
+                None => {
+                    col_locations.push(0);
+                    mask.push(false);
+                },
+            }
+        }
+
+        return Ok((col_locations, column_agg, Some(mask)));
+    }
 
     use DataType as T;
     let col_locations = match column_agg_physical.dtype() {
@@ -299,7 +345,7 @@ pub(super) fn compute_col_idx(
         },
     };
 
-    Ok((col_locations, column_agg))
+    Ok((col_locations, column_agg, None))
 }
 
 fn compute_row_index<'a, T>(

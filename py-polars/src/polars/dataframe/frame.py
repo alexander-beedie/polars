@@ -9160,6 +9160,7 @@ class DataFrame:
         *,
         index: ColumnNameOrSelector | Sequence[ColumnNameOrSelector] | None = None,
         values: ColumnNameOrSelector | Sequence[ColumnNameOrSelector] | None = None,
+        on_columns: Sequence[str] | None = None,
         aggregate_function: PivotAgg | Expr | None = None,
         maintain_order: bool = True,
         sort_columns: bool = False,
@@ -9189,6 +9190,12 @@ class DataFrame:
             aggregation is specified, these are the values on which the aggregation will be computed.
             If None, all remaining columns not specified on `on` and `index` will be used.
             At least one of `index` and `values` must be specified.
+        on_columns
+            Optional pre-specified values from the `on` column(s) that should become output columns.
+            When provided, only these values will be used to create columns, avoiding the need to compute
+            unique values from the data. Values in `on_columns` that don't exist in the data will appear as
+            null-filled columns (with the aggregate function applied). This can significantly improve
+            performance on large datasets when the pivot column values are known in advance.
         aggregate_function
             Choose from:
 
@@ -9383,6 +9390,7 @@ class DataFrame:
                 on,
                 index,
                 values,
+                list(on_columns) if on_columns is not None else None,
                 maintain_order,
                 sort_columns,
                 aggregate_expr,

@@ -73,6 +73,7 @@ pub fn pivot<I0, I1, I2, S0, S1, S2>(
     on: I0,
     index: Option<I1>,
     values: Option<I2>,
+    on_columns: Option<Vec<String>>,
     sort_columns: bool,
     agg_fn: Option<PivotAgg>,
     separator: Option<&str>,
@@ -93,6 +94,7 @@ where
         &index,
         &values,
         agg_fn,
+        on_columns,
         sort_columns,
         false,
         separator,
@@ -109,6 +111,7 @@ pub fn pivot_stable<I0, I1, I2, S0, S1, S2>(
     on: I0,
     index: Option<I1>,
     values: Option<I2>,
+    on_columns: Option<Vec<String>>,
     sort_columns: bool,
     agg_fn: Option<PivotAgg>,
     separator: Option<&str>,
@@ -129,6 +132,7 @@ where
         index.as_slice(),
         values.as_slice(),
         agg_fn,
+        on_columns,
         sort_columns,
         true,
         separator,
@@ -196,6 +200,8 @@ fn pivot_impl(
     values: &[PlSmallStr],
     // aggregation function
     agg_fn: Option<PivotAgg>,
+    // pre-specified values from 'on' column(s) to create output columns
+    on_columns: Option<Vec<String>>,
     sort_columns: bool,
     stable: bool,
     // used as separator/delimiter in generated column names.
@@ -227,6 +233,7 @@ fn pivot_impl(
             &column,
             values,
             agg_fn,
+            on_columns,
             sort_columns,
             separator,
         )
@@ -237,6 +244,7 @@ fn pivot_impl(
             unsafe { on.get_unchecked(0) },
             values,
             agg_fn,
+            on_columns,
             sort_columns,
             separator,
         )
@@ -249,6 +257,7 @@ fn pivot_impl_single_column(
     column: &PlSmallStr,
     values: &[PlSmallStr],
     agg_fn: Option<PivotAgg>,
+    on_columns: Option<Vec<String>>,
     sort_columns: bool,
     separator: Option<&str>,
 ) -> PolarsResult<DataFrame> {
@@ -262,10 +271,10 @@ fn pivot_impl_single_column(
         let groups = pivot_df.group_by_stable(group_by)?.take_groups();
 
         let (col, row) = POOL.join(
-            || positioning::compute_col_idx(pivot_df, column, &groups),
+            || positioning::compute_col_idx(pivot_df, column, &groups, on_columns.as_deref()),
             || positioning::compute_row_idx(pivot_df, index, &groups, count),
         );
-        let (col_locations, column_agg) = col?;
+        let (col_locations, column_agg, column_mask) = col?;
         let (row_locations, n_rows, mut row_index) = row?;
 
         for value_col_name in values {
@@ -314,18 +323,74 @@ fn pivot_impl_single_column(
                 }
             };
 
-            let headers = column_agg.unique_stable()?.cast(&DataType::String)?;
-            let mut headers = headers.str().unwrap().clone();
-            if values.len() > 1 {
-                headers = headers.apply_values(|v| Cow::from(format!("{value_col_name}{sep}{v}")))
-            }
-
-            let n_cols = headers.len();
+            let (headers, n_cols) = match &on_columns {
+                Some(on_vals) => {
+                    // Use pre-specified values as headers
+                    let headers_vec: Vec<Cow<str>> = on_vals
+                        .iter()
+                        .map(|v| {
+                            if values.len() > 1 {
+                                Cow::from(format!("{value_col_name}{sep}{v}"))
+                            } else {
+                                Cow::from(v.as_str())
+                            }
+                        })
+                        .collect();
+                    let headers = StringChunked::from_iter(headers_vec.into_iter().map(Some));
+                    (headers, on_vals.len())
+                },
+                None => {
+                    // Compute unique values from data
+                    let headers = column_agg.unique_stable()?.cast(&DataType::String)?;
+                    let mut headers = headers.str().unwrap().clone();
+                    if values.len() > 1 {
+                        headers =
+                            headers.apply_values(|v| Cow::from(format!("{value_col_name}{sep}{v}")))
+                    }
+                    let n_cols = headers.len();
+                    (headers, n_cols)
+                },
+            };
             let value_agg_phys = value_agg.to_physical_repr();
             let logical_type = value_agg.dtype();
 
             debug_assert_eq!(row_locations.len(), col_locations.len());
             debug_assert_eq!(value_agg_phys.len(), row_locations.len());
+
+            // Filter out invalid values when on_columns is specified
+            let (row_locations, col_locations, value_agg_phys) = if let Some(ref mask) = column_mask
+            {
+                let mut filtered_rows = Vec::new();
+                let mut filtered_cols = Vec::new();
+                let mut filtered_indices = Vec::new();
+
+                for (i, &is_valid) in mask.iter().enumerate() {
+                    if is_valid {
+                        filtered_rows.push(row_locations[i]);
+                        filtered_cols.push(col_locations[i]);
+                        filtered_indices.push(i as IdxSize);
+                    }
+                }
+
+                let filtered_value_agg = if !filtered_indices.is_empty() {
+                    let indices_ca = IdxCa::from_vec(PlSmallStr::EMPTY, filtered_indices);
+                    unsafe { value_agg_phys.take_unchecked(&indices_ca) }
+                } else {
+                    value_agg_phys.clear()
+                };
+
+                (
+                    filtered_rows,
+                    filtered_cols,
+                    filtered_value_agg.into_column(),
+                )
+            } else {
+                (
+                    row_locations.to_vec(),
+                    col_locations.to_vec(),
+                    value_agg_phys.clone(),
+                )
+            };
 
             let mut cols = if value_agg_phys.dtype().is_primitive_numeric() {
                 macro_rules! dispatch {

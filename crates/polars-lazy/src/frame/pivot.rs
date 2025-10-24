@@ -48,6 +48,7 @@ pub fn pivot<I0, I1, I2, S0, S1, S2>(
     on: I0,
     index: Option<I1>,
     values: Option<I2>,
+    on_columns: Option<Vec<String>>,
     sort_columns: bool,
     agg_expr: Option<Expr>,
     // used as separator/delimiter in generated column names.
@@ -68,7 +69,16 @@ where
     }
 
     let agg_expr = agg_expr.map(|ae| PivotAgg(Arc::new(PivotExpr(ae))));
-    polars_ops::pivot::pivot(df, on, index, values, sort_columns, agg_expr, separator)
+    polars_ops::pivot::pivot(
+        df,
+        on,
+        index,
+        values,
+        on_columns,
+        sort_columns,
+        agg_expr,
+        separator,
+    )
 }
 
 pub fn pivot_stable<I0, I1, I2, S0, S1, S2>(
@@ -76,6 +86,7 @@ pub fn pivot_stable<I0, I1, I2, S0, S1, S2>(
     on: I0,
     index: Option<I1>,
     values: Option<I2>,
+    on_columns: Option<Vec<String>>,
     sort_columns: bool,
     agg_expr: Option<Expr>,
     // used as separator/delimiter in generated column names.
@@ -96,5 +107,14 @@ where
     }
 
     let agg_expr = agg_expr.map(|ae| PivotAgg(Arc::new(PivotExpr(ae))));
-    polars_ops::pivot::pivot_stable(df, on, index, values, sort_columns, agg_expr, separator)
+    polars_ops::pivot::pivot_stable(
+        df,
+        on,
+        index,
+        values,
+        on_columns,
+        sort_columns,
+        agg_expr,
+        separator,
+    )
 }

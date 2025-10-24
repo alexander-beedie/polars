@@ -637,6 +637,7 @@ class PyDataFrame:
         on: Sequence[str],
         index: Sequence[str] | None,
         values: Sequence[str] | None,
+        on_values: Sequence[str] | None,
         maintain_order: bool,
         sort_columns: bool,
         aggregate_expr: Any | None,

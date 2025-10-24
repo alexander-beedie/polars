@@ -621,3 +621,175 @@ def test_pivot_agg_null_methods_23408() -> None:
         {"idx": [0, 1], "a": ["aa", "aa"], "b": ["bb", "xx"], "c": ["xx", "cc"]}
     )
     assert_frame_equal(out, expected)
+
+
+def test_pivot_on_columns_basic() -> None:
+    """Test basic on_columns functionality - only specified values appear."""
+    df = pl.DataFrame(
+        {
+            "foo": ["A", "A", "B", "B", "C"],
+            "bar": ["k", "l", "m", "n", "o"],
+            "N": [1, 2, 2, 4, 2],
+        }
+    )
+    # Only request specific columns
+    result = df.pivot(
+        "bar",
+        index="foo",
+        values="N",
+        on_columns=["k", "m", "o"],
+        aggregate_function=None,
+    )
+
+    expected = pl.DataFrame(
+        [
+            ("A", 1, None, None),
+            ("B", None, 2, None),
+            ("C", None, None, 2),
+        ],
+        schema=["foo", "k", "m", "o"],
+        orient="row",
+    )
+    assert_frame_equal(result, expected)
+
+
+def test_pivot_on_columns_nonexistent() -> None:
+    """Test that values in on_columns that don't exist appear as null columns."""
+    df = pl.DataFrame(
+        {
+            "foo": ["A", "A", "B"],
+            "bar": ["x", "y", "x"],
+            "N": [1, 2, 3],
+        }
+    )
+    # Request columns including some that don't exist in data
+    # Need to use an aggregate function for proper null handling
+    result = df.pivot(
+        "bar",
+        index="foo",
+        values="N",
+        on_columns=["x", "y", "z"],  # 'z' doesn't exist
+        aggregate_function="sum",
+    )
+
+    expected = pl.DataFrame(
+        {
+            "foo": ["A", "B"],
+            "x": [1, 3],
+            "y": [2, 0],
+            "z": [0, 0],  # Sum returns 0 for empty groups
+        }
+    )
+    assert_frame_equal(result, expected)
+
+
+def test_pivot_on_columns_with_aggregate() -> None:
+    """Test on_columns with aggregation functions."""
+    df = pl.DataFrame(
+        {
+            "a": [1, 1, 2, 2, 3],
+            "b": ["a", "a", "b", "b", "c"],
+            "c": [2, 4, None, 8, 10],
+        }
+    )
+    result = df.pivot(
+        index="b",
+        on="a",
+        values="c",
+        on_columns=["1", "3"],  # Only columns 1 and 3, skip 2
+        aggregate_function="sum",
+        sort_columns=True,
+    )
+
+    expected = pl.DataFrame({"b": ["a", "b", "c"], "1": [6, 0, 0], "3": [0, 0, 10]})
+    assert_frame_equal(result, expected)
+
+
+def test_pivot_on_columns_multiple_value_columns() -> None:
+    """Test on_columns with multiple value columns."""
+    df = pl.DataFrame(
+        {
+            "x1": [1, 2, 3, 4, 5, 6],
+            "x2": [10, 20, 30, 40, 50, 60],
+            "c1": ["A", "B", "A", "B", "A", "B"],
+            "c2": ["X", "X", "Y", "Y", "Z", "Z"],
+        }
+    )
+
+    result = df.pivot(
+        index="c1",
+        on="c2",
+        values=["x1", "x2"],
+        on_columns=["X", "Z"],  # Skip Y
+        separator="|",
+        aggregate_function="first",
+    )
+    expected = {
+        "c1": ["A", "B"],
+        "x1|X": [1, 2],
+        "x1|Z": [5, 6],
+        "x2|X": [10, 20],
+        "x2|Z": [50, 60],
+    }
+    assert result.to_dict(as_series=False) == expected
+
+
+def test_pivot_on_columns_order() -> None:
+    """Test that on_columns determines column order."""
+    df = pl.DataFrame(
+        {
+            "foo": ["A", "A", "A"],
+            "bar": ["c", "b", "a"],
+            "N": [1, 2, 3],
+        }
+    )
+    # Specify explicit order (reverse alphabetical)
+    result = df.pivot(
+        "bar",
+        index="foo",
+        values="N",
+        on_columns=["c", "b", "a"],  # Explicit order
+        aggregate_function=None,
+    )
+
+    expected = pl.DataFrame({"foo": ["A"], "c": [1], "b": [2], "a": [3]})
+    assert_frame_equal(result, expected)
+
+
+def test_pivot_on_columns_empty_list() -> None:
+    """Test on_columns with empty list results in only index columns."""
+    df = pl.DataFrame(
+        {
+            "foo": ["A", "B"],
+            "bar": ["x", "y"],
+            "N": [1, 2],
+        }
+    )
+    result = df.pivot(
+        "bar", index="foo", values="N", on_columns=[], aggregate_function=None
+    )
+
+    expected = pl.DataFrame({"foo": ["A", "B"]})
+    assert_frame_equal(result, expected)
+
+
+def test_pivot_on_columns_with_nulls_in_on_column() -> None:
+    """Test on_columns handles null values in the on column appropriately."""
+    df = pl.DataFrame(
+        {
+            "idx": ["A", "A", "B"],
+            "on_col": ["x", None, "y"],
+            "val": [1, 2, 3],
+        }
+    )
+    # Request only 'x', should filter out the null and 'y'
+    result = df.pivot(
+        "on_col",
+        index="idx",
+        values="val",
+        on_columns=["x", "z"],
+        aggregate_function="sum",
+    )
+
+    expected = pl.DataFrame({"idx": ["A", "B"], "x": [1, 0], "z": [0, 0]})
+    assert_frame_equal(result, expected)
