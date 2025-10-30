@@ -1091,7 +1091,7 @@ class PyLazyFrame:
     def unique(
         self,
         maintain_order: bool,
-        subset: PySelector | None,
+        subset: list[PyExpr] | None,
         keep: UniqueKeepStrategy,
     ) -> PyLazyFrame: ...
     def drop_nans(self, subset: PySelector | None) -> PyLazyFrame: ...
