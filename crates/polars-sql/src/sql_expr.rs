@@ -265,7 +265,9 @@ impl SQLExprVisitor<'_> {
             .ctx
             .execute_isolated(|ctx| ctx.execute_query_no_ctes(subquery))?;
 
-        let schema = self.ctx.get_frame_schema(&mut lf)?;
+        // the `collect_schema` here will use the arenas cached inside this lf (if present)
+        // (fixes https://github.com/pola-rs/polars/issues/20732)
+        let schema = lf.collect_schema()?;
 
         if restriction == SubqueryRestriction::SingleColumn {
             if schema.len() != 1 {
