@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["named_serde"],"struct":["BaseColumnUdf","SpecialEq"],"trait":["AnonymousColumnsUdf","ColumnsUdf"],"type":["OpaqueColumnUdf"]};
