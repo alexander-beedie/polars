@@ -1,4 +1,4 @@
-use std::ops::Deref;
+use std::ops::{ControlFlow, Deref};
 
 use polars_core::frame::row::Row;
 use polars_core::prelude::*;
@@ -12,7 +12,7 @@ use sqlparser::ast::{
     FunctionArg, GroupByExpr, Ident, JoinConstraint, JoinOperator, ObjectName, ObjectType, Offset,
     OrderBy, Query, RenameSelectItem, Select, SelectItem, SetExpr, SetOperator, SetQuantifier,
     Statement, TableAlias, TableFactor, TableWithJoins, UnaryOperator, Value as SQLValue, Values,
-    WildcardAdditionalOptions,
+    Visit, Visitor, WildcardAdditionalOptions,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::{Parser, ParserOptions};
@@ -1065,8 +1065,7 @@ impl SQLContext {
         constraint: &JoinConstraint,
         join_type: JoinType,
     ) -> PolarsResult<LazyFrame> {
-        let (left_on, right_on) = process_join_constraint(constraint, tbl_left, tbl_right)?;
-
+        let (left_on, right_on) = process_join_constraint(constraint, tbl_left, tbl_right, self)?;
         let joined = tbl_left
             .frame
             .clone()
@@ -1097,7 +1096,6 @@ impl SQLContext {
                 e => e,
             })
         }
-
         if contexts.is_empty() {
             lf
         } else {
@@ -1537,12 +1535,12 @@ impl SQLContext {
         // SELECT * RENAME
         if let Some(items) = &options.opt_rename {
             let renames = match items {
-                RenameSelectItem::Single(rename) => vec![rename],
-                RenameSelectItem::Multiple(renames) => renames.iter().collect(),
+                RenameSelectItem::Single(rename) => std::slice::from_ref(rename),
+                RenameSelectItem::Multiple(renames) => renames.as_slice(),
             };
             for rn in renames {
-                let (before, after) = (rn.ident.value.as_str(), rn.alias.value.as_str());
-                let (before, after) = (PlSmallStr::from_str(before), PlSmallStr::from_str(after));
+                let before = PlSmallStr::from_str(rn.ident.value.as_str());
+                let after = PlSmallStr::from_str(rn.alias.value.as_str());
                 if before != after {
                     modifiers.rename.insert(before, after);
                 }
@@ -1600,27 +1598,6 @@ impl SQLContext {
     }
 }
 
-fn collect_compound_identifiers(
-    left: &[Ident],
-    right: &[Ident],
-    left_name: &str,
-    right_name: &str,
-) -> PolarsResult<(Vec<Expr>, Vec<Expr>)> {
-    if left.len() == 2 && right.len() == 2 {
-        let (tbl_a, col_name_a) = (left[0].value.as_str(), left[1].value.as_str());
-        let (tbl_b, col_name_b) = (right[0].value.as_str(), right[1].value.as_str());
-
-        // switch left/right operands if the caller has them in reverse
-        if left_name == tbl_b || right_name == tbl_a {
-            Ok((vec![col(col_name_b)], vec![col(col_name_a)]))
-        } else {
-            Ok((vec![col(col_name_a)], vec![col(col_name_b)]))
-        }
-    } else {
-        polars_bail!(SQLInterface: "collect_compound_identifiers: Expected left.len() == 2 && right.len() == 2, but found left.len() == {:?}, right.len() == {:?}", left.len(), right.len());
-    }
-}
-
 fn expand_exprs(expr: Expr, schema: &SchemaRef) -> Vec<Expr> {
     match expr {
         Expr::Column(nm) if is_regex_colname(nm.as_str()) => {
@@ -1645,36 +1622,100 @@ fn is_regex_colname(nm: &str) -> bool {
     nm.starts_with('^') && nm.ends_with('$')
 }
 
+/// Visitor that checks if an expression tree contains a reference to a specific table.
+struct FindTableIdentifier<'a> {
+    table_name: &'a str,
+    found: bool,
+}
+
+impl<'a> Visitor for FindTableIdentifier<'a> {
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expr: &SQLExpr) -> ControlFlow<Self::Break> {
+        if let SQLExpr::CompoundIdentifier(idents) = expr {
+            if idents.len() >= 2 && idents[0].value.as_str() == self.table_name {
+                self.found = true; // return immediately on first match
+                return ControlFlow::Break(());
+            }
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// Check if a SQL expression contains a reference to a specific table.
+fn expr_refers_to_table(expr: &SQLExpr, table_name: &str) -> bool {
+    let mut table_finder = FindTableIdentifier {
+        table_name,
+        found: false,
+    };
+    let _ = expr.visit(&mut table_finder);
+    table_finder.found
+}
+
 fn process_join_on(
     expression: &sqlparser::ast::Expr,
     tbl_left: &TableInfo,
     tbl_right: &TableInfo,
+    ctx: &mut SQLContext,
 ) -> PolarsResult<(Vec<Expr>, Vec<Expr>)> {
     match expression {
         SQLExpr::BinaryOp { left, op, right } => match op {
             BinaryOperator::And => {
-                let (mut left_i, mut right_i) = process_join_on(left, tbl_left, tbl_right)?;
-                let (mut left_j, mut right_j) = process_join_on(right, tbl_left, tbl_right)?;
+                let (mut left_i, mut right_i) = process_join_on(left, tbl_left, tbl_right, ctx)?;
+                let (mut left_j, mut right_j) = process_join_on(right, tbl_left, tbl_right, ctx)?;
                 left_i.append(&mut left_j);
                 right_i.append(&mut right_j);
                 Ok((left_i, right_i))
             },
-            BinaryOperator::Eq => match (left.as_ref(), right.as_ref()) {
-                (SQLExpr::CompoundIdentifier(left), SQLExpr::CompoundIdentifier(right)) => {
-                    collect_compound_identifiers(left, right, &tbl_left.name, &tbl_right.name)
-                },
-                _ => {
-                    polars_bail!(SQLInterface: "only equi-join constraints (on identifiers) are currently supported; found lhs={:?}, rhs={:?}", left, right)
-                },
+            BinaryOperator::Eq => {
+                // create a unified schema containing columns from both tables; needed for
+                // chained/multi joins where the left table may contain columns from
+                // previous joins that aren't in the original registered table.
+                let mut unified_schema =
+                    Schema::with_capacity(tbl_left.schema.len() + tbl_right.schema.len());
+                for (name, dtype) in tbl_left.schema.iter() {
+                    unified_schema.insert_at_index(
+                        unified_schema.len(),
+                        name.clone(),
+                        dtype.clone(),
+                    )?;
+                }
+                for (name, dtype) in tbl_right.schema.iter() {
+                    if !unified_schema.contains(name) {
+                        unified_schema.insert_at_index(
+                            unified_schema.len(),
+                            name.clone(),
+                            dtype.clone(),
+                        )?;
+                    }
+                }
+                let left_on = parse_sql_expr(left, ctx, Some(&unified_schema))?;
+                let right_on = parse_sql_expr(right, ctx, Some(&unified_schema))?;
+
+                // check which table (left/right) each expression references
+                let left_refs = (
+                    expr_refers_to_table(left, &tbl_left.name),
+                    expr_refers_to_table(left, &tbl_right.name),
+                );
+                let right_refs = (
+                    expr_refers_to_table(right, &tbl_left.name),
+                    expr_refers_to_table(right, &tbl_right.name),
+                );
+
+                // swap if expressions reference opposite tables (e.g., df2.col = df1.col)
+                match (left_refs, right_refs) {
+                    ((false, true), (true, false)) => Ok((vec![right_on], vec![left_on])),
+                    _ => Ok((vec![left_on], vec![right_on])),
+                }
             },
-            _ => {
-                polars_bail!(SQLInterface: "only equi-join constraints (combined with 'AND') are currently supported; found op = '{:?}'", op)
-            },
+            _ => polars_bail!(
+                SQLInterface: "only equi-join constraints (combined with 'AND') are currently supported; found op = '{:?}'", op
+            ),
         },
-        SQLExpr::Nested(expr) => process_join_on(expr, tbl_left, tbl_right),
-        _ => {
-            polars_bail!(SQLInterface: "only equi-join constraints are currently supported; found expression = {:?}", expression)
-        },
+        SQLExpr::Nested(expr) => process_join_on(expr, tbl_left, tbl_right, ctx),
+        _ => polars_bail!(
+            SQLInterface: "only equi-join constraints are currently supported; found expression = {:?}", expression
+        ),
     }
 }
 
@@ -1682,10 +1723,11 @@ fn process_join_constraint(
     constraint: &JoinConstraint,
     tbl_left: &TableInfo,
     tbl_right: &TableInfo,
+    ctx: &mut SQLContext,
 ) -> PolarsResult<(Vec<Expr>, Vec<Expr>)> {
     match constraint {
         JoinConstraint::On(expr @ SQLExpr::BinaryOp { .. }) => {
-            process_join_on(expr, tbl_left, tbl_right)
+            process_join_on(expr, tbl_left, tbl_right, ctx)
         },
         JoinConstraint::Using(idents) if !idents.is_empty() => {
             let using: Vec<Expr> = idents.iter().map(|id| col(id.value.as_str())).collect();
