@@ -15,7 +15,7 @@ use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::{
     DateTimeField, DuplicateTreatment, Expr as SQLExpr, Function as SQLFunction, FunctionArg,
     FunctionArgExpr, FunctionArgumentClause, FunctionArgumentList, FunctionArguments, Ident,
-    OrderByExpr, Value as SQLValue, WindowSpec, WindowType,
+    OrderByExpr, Value as SQLValue, ValueWithSpan, WindowSpec, WindowType,
 };
 use sqlparser::tokenizer::Span;
 
@@ -819,7 +819,7 @@ impl PolarsSQLFunctions {
 
 impl PolarsSQLFunctions {
     fn try_from_sql(function: &'_ SQLFunction, ctx: &'_ SQLContext) -> PolarsResult<Self> {
-        let function_name = function.name.0[0].value.to_lowercase();
+        let function_name = function.name.0[0].as_ident().unwrap().value.to_lowercase();
         Ok(match function_name.as_str() {
             // ----
             // Bitwise functions
@@ -1615,7 +1615,7 @@ impl SQLFunctionVisitor<'_> {
                 .iter()
                 .map(|o| {
                     let expr = parse_sql_expr(&o.expr, self.ctx, self.active_schema)?;
-                    Ok(match o.asc {
+                    Ok(match o.options.asc {
                         Some(b) => (expr, !b),
                         None => (expr, false),
                     })
@@ -1862,9 +1862,9 @@ impl SQLFunctionVisitor<'_> {
         for ob in order_by {
             // note: if not specified 'NULLS FIRST' is default for DESC, 'NULLS LAST' otherwise
             // https://www.postgresql.org/docs/current/queries-order.html
-            let desc_order = !ob.asc.unwrap_or(true);
+            let desc_order = !ob.options.asc.unwrap_or(true);
             by.push(parse_sql_expr(&ob.expr, self.ctx, self.active_schema)?);
-            nulls_last.push(!ob.nulls_first.unwrap_or(desc_order));
+            nulls_last.push(!ob.options.nulls_first.unwrap_or(desc_order));
             descending.push(desc_order);
         }
         Ok(expr.sort_by(
@@ -1889,7 +1889,7 @@ impl SQLFunctionVisitor<'_> {
                         .iter()
                         .map(|o| {
                             let e = parse_sql_expr(&o.expr, self.ctx, self.active_schema)?;
-                            Ok(o.asc.map_or(e.clone(), |b| {
+                            Ok(o.options.asc.map_or(e.clone(), |b| {
                                 e.sort(SortOptions::default().with_order_descending(!b))
                             }))
                         })
@@ -1985,7 +1985,7 @@ impl FromSQLExpr for f64 {
         Self: Sized,
     {
         match expr {
-            SQLExpr::Value(v) => match v {
+            SQLExpr::Value(ValueWithSpan { value: v, .. }) => match v {
                 SQLValue::Number(s, _) => s
                     .parse()
                     .map_err(|_| polars_err!(SQLInterface: "cannot parse literal {:?}", s)),
@@ -2002,7 +2002,7 @@ impl FromSQLExpr for bool {
         Self: Sized,
     {
         match expr {
-            SQLExpr::Value(v) => match v {
+            SQLExpr::Value(ValueWithSpan { value: v, .. }) => match v {
                 SQLValue::Boolean(v) => Ok(*v),
                 _ => polars_bail!(SQLInterface: "cannot parse boolean {:?}", v),
             },
@@ -2017,7 +2017,7 @@ impl FromSQLExpr for String {
         Self: Sized,
     {
         match expr {
-            SQLExpr::Value(v) => match v {
+            SQLExpr::Value(ValueWithSpan { value: v, .. }) => match v {
                 SQLValue::SingleQuotedString(s) => Ok(s.clone()),
                 _ => polars_bail!(SQLInterface: "cannot parse literal {:?}", v),
             },
@@ -2032,7 +2032,7 @@ impl FromSQLExpr for StrptimeOptions {
         Self: Sized,
     {
         match expr {
-            SQLExpr::Value(v) => match v {
+            SQLExpr::Value(ValueWithSpan { value: v, .. }) => match v {
                 SQLValue::SingleQuotedString(s) => Ok(StrptimeOptions {
                     format: Some(PlSmallStr::from_str(s)),
                     ..StrptimeOptions::default()

@@ -9,10 +9,11 @@ use polars_plan::prelude::*;
 use polars_utils::format_pl_smallstr;
 use sqlparser::ast::{
     BinaryOperator, CreateTable, Delete, Distinct, ExcludeSelectItem, Expr as SQLExpr, FromTable,
-    FunctionArg, GroupByExpr, Ident, JoinConstraint, JoinOperator, ObjectName, ObjectType, Offset,
-    OrderBy, Query, RenameSelectItem, Select, SelectItem, SetExpr, SetOperator, SetQuantifier,
-    Statement, TableAlias, TableFactor, TableWithJoins, UnaryOperator, Value as SQLValue, Values,
-    Visit, Visitor, WildcardAdditionalOptions,
+    FunctionArg, GroupByExpr, Ident, JoinConstraint, JoinOperator, LimitClause, ObjectName,
+    ObjectNamePart, ObjectType, OrderBy, OrderByKind, Query, RenameSelectItem, Select, SelectItem,
+    SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Statement, TableAlias,
+    TableFactor, TableWithJoins, UnaryOperator, Value as SQLValue, ValueWithSpan, Values, Visit,
+    Visitor, WildcardAdditionalOptions,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::{Parser, ParserOptions};
@@ -214,7 +215,22 @@ impl SQLContext {
 
     pub(crate) fn execute_query_no_ctes(&mut self, query: &Query) -> PolarsResult<LazyFrame> {
         let lf = self.process_query(&query.body, query)?;
-        self.process_limit_offset(lf, &query.limit, &query.offset)
+        let (limit, offset) = match &query.limit_clause {
+            Some(LimitClause::LimitOffset {
+                limit,
+                offset,
+                limit_by,
+            }) => {
+                if !limit_by.is_empty() {
+                    // specialised clickhouse syntax
+                    polars_bail!(SQLSyntax: "LIMIT BY clause is not supported");
+                }
+                (limit.as_ref(), offset.as_ref().map(|o| &o.value))
+            },
+            Some(LimitClause::OffsetCommaLimit { offset, limit }) => (Some(limit), Some(offset)),
+            None => (None, None),
+        };
+        self.process_limit_offset(lf, limit, offset)
     }
 
     pub(crate) fn get_frame_schema(&mut self, frame: &mut LazyFrame) -> PolarsResult<SchemaRef> {
@@ -284,8 +300,19 @@ impl SQLContext {
             SQLExpr::UnaryOp {
                 op: UnaryOperator::Minus,
                 expr,
-            } if matches!(**expr, SQLExpr::Value(SQLValue::Number(_, _))) => {
-                if let SQLExpr::Value(SQLValue::Number(ref idx, _)) = **expr {
+            } if matches!(
+                **expr,
+                SQLExpr::Value(ValueWithSpan {
+                    value: SQLValue::Number(_, _),
+                    ..
+                })
+            ) =>
+            {
+                if let SQLExpr::Value(ValueWithSpan {
+                    value: SQLValue::Number(ref idx, _),
+                    ..
+                }) = **expr
+                {
                     Err(polars_err!(
                     SQLSyntax:
                     "negative ordinal values are invalid for {}; found -{}",
@@ -296,7 +323,10 @@ impl SQLContext {
                     unreachable!()
                 }
             },
-            SQLExpr::Value(SQLValue::Number(idx, _)) => {
+            SQLExpr::Value(ValueWithSpan {
+                value: SQLValue::Number(idx, _),
+                ..
+            }) => {
                 // note: sql queries are 1-indexed
                 let idx = idx.parse::<usize>().map_err(|_| {
                     polars_err!(
@@ -662,8 +692,11 @@ impl SQLContext {
                 let right_schema = self.get_frame_schema(&mut rf)?;
 
                 lf = match &join.join_operator {
-                    op @ (JoinOperator::FullOuter(constraint)
+                    op @ (JoinOperator::Join(constraint)  // note: bare "join" is inner
+                    | JoinOperator::FullOuter(constraint)
+                    | JoinOperator::Left(constraint)
                     | JoinOperator::LeftOuter(constraint)
+                    | JoinOperator::Right(constraint)
                     | JoinOperator::RightOuter(constraint)
                     | JoinOperator::Inner(constraint)
                     | JoinOperator::Anti(constraint)
@@ -689,10 +722,14 @@ impl SQLContext {
                             },
                             constraint,
                             match op {
+                                JoinOperator::Join(_) | JoinOperator::Inner(_) => JoinType::Inner,
+                                JoinOperator::Left(_) | JoinOperator::LeftOuter(_) => {
+                                    JoinType::Left
+                                },
+                                JoinOperator::Right(_) | JoinOperator::RightOuter(_) => {
+                                    JoinType::Right
+                                },
                                 JoinOperator::FullOuter(_) => JoinType::Full,
-                                JoinOperator::LeftOuter(_) => JoinType::Left,
-                                JoinOperator::RightOuter(_) => JoinType::Right,
-                                JoinOperator::Inner(_) => JoinType::Inner,
                                 #[cfg(feature = "semi_anti_join")]
                                 JoinOperator::Anti(_)
                                 | JoinOperator::LeftAnti(_)
@@ -709,7 +746,7 @@ impl SQLContext {
                             },
                         )?
                     },
-                    JoinOperator::CrossJoin => {
+                    JoinOperator::CrossJoin(_) => {
                         lf.cross_join(rf, Some(format_pl_smallstr!(":{}", r_name)))
                     },
                     join_type => {
@@ -997,13 +1034,20 @@ impl SQLContext {
                     let expr = parse_sql_expr(expr, self, Some(schema))?;
                     Ok(vec![expr.alias(PlSmallStr::from_str(alias.value.as_str()))])
                 },
-                SelectItem::QualifiedWildcard(obj_name, wildcard_options) => self
-                    .process_qualified_wildcard(
-                        obj_name,
-                        wildcard_options,
-                        select_modifiers,
-                        Some(schema),
-                    ),
+                SelectItem::QualifiedWildcard(kind, wildcard_options) => match kind {
+                    // eg: `alias.*` or `schema.table.*`
+                    SelectItemQualifiedWildcardKind::ObjectName(obj_name) => self
+                        .process_qualified_wildcard(
+                            obj_name,
+                            wildcard_options,
+                            select_modifiers,
+                            Some(schema),
+                        ),
+                    // eg: `STRUCT<STRING>('foo').*`
+                    SelectItemQualifiedWildcardKind::Expr(_) => {
+                        polars_bail!(SQLSyntax: "qualified wildcard on expressions not yet supported: {:?}", select_item)
+                    },
+                },
                 SelectItem::Wildcard(wildcard_options) => {
                     let cols = schema
                         .iter_names()
@@ -1044,11 +1088,16 @@ impl SQLContext {
 
             // shortcut filter evaluation if given expression is just TRUE or FALSE
             let (all_true, all_false) = match expr {
-                SQLExpr::Value(SQLValue::Boolean(b)) => (*b, !*b),
+                SQLExpr::Value(ValueWithSpan {
+                    value: SQLValue::Boolean(b),
+                    ..
+                }) => (*b, !*b),
                 SQLExpr::BinaryOp { left, op, right } => match (&**left, &**right, op) {
-                    (SQLExpr::Value(a), SQLExpr::Value(b), BinaryOperator::Eq) => (a == b, a != b),
+                    (SQLExpr::Value(a), SQLExpr::Value(b), BinaryOperator::Eq) => {
+                        (a.value == b.value, a.value != b.value)
+                    },
                     (SQLExpr::Value(a), SQLExpr::Value(b), BinaryOperator::NotEq) => {
-                        (a != b, a == b)
+                        (a.value != b.value, a.value == b.value)
                     },
                     _ => (false, false),
                 },
@@ -1128,7 +1177,7 @@ impl SQLContext {
             ..
         }) = stmt
         {
-            let tbl_name = name.0.first().unwrap().value.as_str();
+            let tbl_name = name.0.first().unwrap().as_ident().unwrap().value.as_str();
             // CREATE TABLE IF NOT EXISTS
             if *if_not_exists && self.table_map.contains_key(tbl_name) {
                 polars_bail!(SQLInterface: "relation '{}' already exists", tbl_name);
@@ -1159,7 +1208,7 @@ impl SQLContext {
                 if let Some(args) = args {
                     return self.execute_table_function(name, alias, &args.args);
                 }
-                let tbl_name = name.0.first().unwrap().value.as_str();
+                let tbl_name = name.0.first().unwrap().as_ident().unwrap().value.as_str();
                 if let Some(lf) = self.get_table_from_current_scope(tbl_name) {
                     match alias {
                         Some(alias) => {
@@ -1272,7 +1321,7 @@ impl SQLContext {
         alias: &Option<TableAlias>,
         args: &[FunctionArg],
     ) -> PolarsResult<(String, LazyFrame)> {
-        let tbl_fn = name.0.first().unwrap().value.as_str();
+        let tbl_fn = name.0.first().unwrap().as_ident().unwrap().value.as_str();
         let read_fn = tbl_fn.parse::<PolarsTableFunctions>()?;
         let (tbl_name, lf) = read_fn.execute(args)?;
         #[allow(clippy::useless_asref)]
@@ -1291,35 +1340,63 @@ impl SQLContext {
         order_by: &Option<OrderBy>,
         selected: Option<&[Expr]>,
     ) -> PolarsResult<LazyFrame> {
-        if order_by.as_ref().is_none_or(|ob| ob.exprs.is_empty()) {
+        if order_by.as_ref().is_none_or(|ob| match &ob.kind {
+            OrderByKind::Expressions(exprs) => exprs.is_empty(),
+            OrderByKind::All(_) => false,
+        }) {
             return Ok(lf);
         }
         let schema = self.get_frame_schema(&mut lf)?;
         let columns_iter = schema.iter_names().map(|e| col(e.clone()));
+        let (order_by, order_by_all, n_order_cols) = match &order_by.as_ref().unwrap().kind {
+            OrderByKind::Expressions(exprs) => {
+                // TODO: will look at making an upstream PR that allows us to easily create
+                //  a GenericDialect variant supporting "OrderByKind::All" instead (cleaner)
+                if exprs.len() == 1
+                    && matches!(&exprs[0].expr, SQLExpr::Identifier(ident)
+                        if ident.value.to_uppercase() == "ALL"
+                        && !schema.iter_names().any(|name| name.to_uppercase() == "ALL"))
+                {
+                    // Treat as ORDER BY ALL
+                    let n_cols = if let Some(selected) = selected {
+                        selected.len()
+                    } else {
+                        schema.len()
+                    };
+                    (vec![], Some(&exprs[0].options), n_cols)
+                } else {
+                    (exprs.clone(), None, exprs.len())
+                }
+            },
+            OrderByKind::All(opts) => {
+                let n_cols = if let Some(selected) = selected {
+                    selected.len()
+                } else {
+                    schema.len()
+                };
+                (vec![], Some(opts), n_cols)
+            },
+        };
+        let mut descending = Vec::with_capacity(n_order_cols);
+        let mut nulls_last = Vec::with_capacity(n_order_cols);
+        let mut by: Vec<Expr> = Vec::with_capacity(n_order_cols);
 
-        let order_by = order_by.as_ref().unwrap().exprs.clone();
-        let mut descending = Vec::with_capacity(order_by.len());
-        let mut nulls_last = Vec::with_capacity(order_by.len());
-        let mut by: Vec<Expr> = Vec::with_capacity(order_by.len());
-
-        if order_by.len() == 1  // support `ORDER BY ALL` (iff there is no column named 'ALL' in the schema)
-            && matches!(&order_by[0].expr, SQLExpr::Identifier(ident) if ident.value.to_uppercase() == "ALL" && !schema.iter_names().any(|name| name.to_uppercase() == "ALL"))
-        {
+        if let Some(opts) = order_by_all {
             if let Some(selected) = selected {
                 by.extend(selected.iter().cloned());
             } else {
                 by.extend(columns_iter);
             };
-            let desc_order = !order_by[0].asc.unwrap_or(true);
-            nulls_last.resize(by.len(), !order_by[0].nulls_first.unwrap_or(desc_order));
+            let desc_order = !opts.asc.unwrap_or(true);
+            nulls_last.resize(by.len(), !opts.nulls_first.unwrap_or(desc_order));
             descending.resize(by.len(), desc_order);
         } else {
             let columns = &columns_iter.collect::<Vec<_>>();
             for ob in order_by {
                 // note: if not specified 'NULLS FIRST' is default for DESC, 'NULLS LAST' otherwise
                 // https://www.postgresql.org/docs/current/queries-order.html
-                let desc_order = !ob.asc.unwrap_or(true);
-                nulls_last.push(!ob.nulls_first.unwrap_or(desc_order));
+                let desc_order = !ob.options.asc.unwrap_or(true);
+                nulls_last.push(!ob.options.nulls_first.unwrap_or(desc_order));
                 descending.push(desc_order);
 
                 // translate order expression, allowing ordinal values
@@ -1449,16 +1526,19 @@ impl SQLContext {
     fn process_limit_offset(
         &self,
         lf: LazyFrame,
-        limit: &Option<SQLExpr>,
-        offset: &Option<Offset>,
+        limit: Option<&SQLExpr>,
+        offset: Option<&SQLExpr>,
     ) -> PolarsResult<LazyFrame> {
         match (offset, limit) {
             (
-                Some(Offset {
-                    value: SQLExpr::Value(SQLValue::Number(offset, _)),
+                Some(SQLExpr::Value(ValueWithSpan {
+                    value: SQLValue::Number(offset, _),
                     ..
-                }),
-                Some(SQLExpr::Value(SQLValue::Number(limit, _))),
+                })),
+                Some(SQLExpr::Value(ValueWithSpan {
+                    value: SQLValue::Number(limit, _),
+                    ..
+                })),
             ) => Ok(lf.slice(
                 offset
                     .parse()
@@ -1468,10 +1548,10 @@ impl SQLContext {
                     .map_err(|e| polars_err!(SQLInterface: "LIMIT conversion error: {}", e))?,
             )),
             (
-                Some(Offset {
-                    value: SQLExpr::Value(SQLValue::Number(offset, _)),
+                Some(SQLExpr::Value(ValueWithSpan {
+                    value: SQLValue::Number(offset, _),
                     ..
-                }),
+                })),
                 None,
             ) => Ok(lf.slice(
                 offset
@@ -1479,7 +1559,13 @@ impl SQLContext {
                     .map_err(|e| polars_err!(SQLInterface: "OFFSET conversion error: {}", e))?,
                 IdxSize::MAX,
             )),
-            (None, Some(SQLExpr::Value(SQLValue::Number(limit, _)))) => Ok(lf.limit(
+            (
+                None,
+                Some(SQLExpr::Value(ValueWithSpan {
+                    value: SQLValue::Number(limit, _),
+                    ..
+                })),
+            ) => Ok(lf.limit(
                 limit
                     .parse()
                     .map_err(|e| polars_err!(SQLInterface: "LIMIT conversion error: {}", e))?,
@@ -1499,9 +1585,14 @@ impl SQLContext {
         schema: Option<&Schema>,
     ) -> PolarsResult<Vec<Expr>> {
         let mut new_idents = idents.clone();
-        new_idents.push(Ident::new("*"));
+        new_idents.push(ObjectNamePart::Identifier(Ident::new("*")));
 
-        let expr = resolve_compound_identifier(self, new_idents.deref(), schema);
+        let ident_refs: Vec<&Ident> = new_idents.iter().filter_map(|p| p.as_ident()).collect();
+        let expr = resolve_compound_identifier(
+            self,
+            &ident_refs.iter().map(|&i| i.clone()).collect::<Vec<_>>(),
+            schema,
+        );
         self.process_wildcard_additional_options(expr?, options, modifiers, schema)
     }
 
@@ -1828,7 +1919,18 @@ fn process_join_constraint(
             process_join_on(ctx, expr, tbl_left, tbl_right)
         },
         JoinConstraint::Using(idents) if !idents.is_empty() => {
-            let using: Vec<Expr> = idents.iter().map(|id| col(id.value.as_str())).collect();
+            let using: Vec<Expr> = idents
+                .iter()
+                .map(|ObjectName(parts)| {
+                    if parts.len() != 1 {
+                        polars_bail!(SQLSyntax: "JOIN \"USING\" clause expects simple column names, not qualified names");
+                    }
+                    match parts[0].as_ident() {
+                        Some(ident) => Ok(col(ident.value.as_str())),
+                        None => polars_bail!(SQLSyntax: "JOIN \"USING\" clause expects identifiers, not functions"),
+                    }
+                })
+                .collect::<PolarsResult<Vec<_>>>()?;
             Ok((using.clone(), using))
         },
         JoinConstraint::Natural => {
