@@ -195,8 +195,9 @@ pub(crate) fn _sort_or_hash_inner(
     s_right: &Series,
     _verbose: bool,
     validate: JoinValidation,
-    nulls_equal: bool,
+    nulls_equal: &[bool],
 ) -> PolarsResult<(InnerJoinIds, bool)> {
+    let nulls_equal = nulls_equal.first().copied().unwrap_or(false);
     s_left.hash_join_inner(s_right, validate, nulls_equal)
 }
 
@@ -206,8 +207,9 @@ pub(crate) fn _sort_or_hash_inner(
     s_right: &Series,
     verbose: bool,
     validate: JoinValidation,
-    nulls_equal: bool,
+    nulls_equal: &[bool],
 ) -> PolarsResult<(InnerJoinIds, bool)> {
+    let nulls_equal = nulls_equal.first().copied().unwrap_or(false);
     // We check if keys are sorted.
     // - If they are we can do a sorted merge join
     // If one of the keys is not, it can still be faster to sort that key and use
@@ -298,8 +300,9 @@ pub(crate) fn sort_or_hash_left(
     s_right: &Series,
     _verbose: bool,
     validate: JoinValidation,
-    nulls_equal: bool,
+    nulls_equal: &[bool],
 ) -> PolarsResult<LeftJoinIds> {
+    let nulls_equal = nulls_equal.first().copied().unwrap_or(false);
     s_left.hash_join_left(s_right, validate, nulls_equal)
 }
 
@@ -309,8 +312,9 @@ pub(crate) fn sort_or_hash_left(
     s_right: &Series,
     verbose: bool,
     validate: JoinValidation,
-    nulls_equal: bool,
+    nulls_equal: &[bool],
 ) -> PolarsResult<LeftJoinIds> {
+    let nulls_equal = nulls_equal.first().copied().unwrap_or(false);
     if validate.needs_checks() {
         return s_left.hash_join_left(s_right, validate, nulls_equal);
     }

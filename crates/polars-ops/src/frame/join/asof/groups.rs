@@ -317,8 +317,8 @@ where
         // TODO: @scalar-opt.
         let left_by_series: Vec<_> = left_by.materialized_column_iter().cloned().collect();
         let right_by_series: Vec<_> = right_by.materialized_column_iter().cloned().collect();
-        let lhs_keys = prepare_keys_multiple(&left_by_series, false)?;
-        let rhs_keys = prepare_keys_multiple(&right_by_series, false)?;
+        let lhs_keys = prepare_keys_multiple(&left_by_series, &[false])?;
+        let rhs_keys = prepare_keys_multiple(&right_by_series, &[false])?;
         asof_join_by_binary::<BinaryOffsetType, T, A, F>(
             &lhs_keys, &rhs_keys, left_asof, right_asof, filter, allow_eq,
         )

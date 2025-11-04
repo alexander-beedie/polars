@@ -150,7 +150,7 @@ pub trait JoinDispatch: IntoDf {
 
         // Get the indexes of the joined relations
         let (mut join_idx_l, mut join_idx_r) =
-            s_left.hash_join_outer(s_right, args.validation, args.nulls_equal)?;
+            s_left.hash_join_outer(s_right, args.validation, &args.nulls_equal)?;
 
         try_raise_keyboard_interrupt();
         if let Some((offset, len)) = args.slice {
