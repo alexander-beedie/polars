@@ -5881,7 +5881,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         right_on: str | Expr | Sequence[str | Expr] | None = None,
         suffix: str = "_right",
         validate: JoinValidation = "m:m",
-        nulls_equal: bool = False,
+        nulls_equal: bool | Sequence[bool] = False,
         coalesce: bool | None = None,
         maintain_order: MaintainOrderJoin | None = None,
         allow_parallel: bool = True,
@@ -5950,7 +5950,11 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
             .. note::
                 This is currently not supported by the streaming engine.
         nulls_equal
-            Join on null values. By default null values will never produce matches.
+            Consider null values as equal during the join. By default null values
+            will never produce matches.
+
+            * If a single boolean: Applies to all join keys.
+            * If a sequence: Applied per join key (length must match number of keys).
         coalesce
             Coalescing behavior (merging of join columns).
 
@@ -6118,6 +6122,10 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
             if uses_on or uses_lr_on:
                 msg = "cross join should not pass join keys"
                 raise ValueError(msg)
+            # Cross join has no keys, so nulls_equal should be an empty list
+            nulls_equal_list = (
+                [] if isinstance(nulls_equal, bool) else list(nulls_equal)
+            )
             return self._from_pyldf(
                 self._ldf.join(
                     other._ldf,
@@ -6125,7 +6133,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
                     [],
                     allow_parallel,
                     force_parallel,
-                    nulls_equal,
+                    nulls_equal_list,
                     how,
                     suffix,
                     validate,
@@ -6145,6 +6153,14 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
             msg = "must specify `on` OR `left_on` and `right_on`"
             raise ValueError(msg)
 
+        # Convert nulls_equal to list matching number of join keys
+        nulls_equal_list = extend_bool(
+            nulls_equal,
+            len(pyexprs_left),
+            "nulls_equal",
+            "join keys",
+        )
+
         return self._from_pyldf(
             self._ldf.join(
                 other._ldf,
@@ -6152,7 +6168,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
                 pyexprs_right,
                 allow_parallel,
                 force_parallel,
-                nulls_equal,
+                nulls_equal_list,
                 how,
                 suffix,
                 validate,

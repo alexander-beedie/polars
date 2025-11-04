@@ -21,7 +21,7 @@ pub trait SeriesJoin: SeriesSealed + Sized {
     ) -> PolarsResult<LeftJoinIds> {
         let s_self = self.as_series();
         let (lhs, rhs) = (s_self.to_physical_repr(), other.to_physical_repr());
-        validate.validate_probe(&lhs, &rhs, false, nulls_equal)?;
+        validate.validate_probe(&lhs, &rhs, false, &[nulls_equal])?;
 
         let lhs_dtype = lhs.dtype();
         let rhs_dtype = rhs.dtype();
@@ -237,7 +237,7 @@ pub trait SeriesJoin: SeriesSealed + Sized {
     ) -> PolarsResult<(InnerJoinIds, bool)> {
         let s_self = self.as_series();
         let (lhs, rhs) = (s_self.to_physical_repr(), other.to_physical_repr());
-        validate.validate_probe(&lhs, &rhs, true, nulls_equal)?;
+        validate.validate_probe(&lhs, &rhs, true, &[nulls_equal])?;
 
         let lhs_dtype = lhs.dtype();
         let rhs_dtype = rhs.dtype();
@@ -356,11 +356,12 @@ pub trait SeriesJoin: SeriesSealed + Sized {
         &self,
         other: &Series,
         validate: JoinValidation,
-        nulls_equal: bool,
+        nulls_equal: &[bool],
     ) -> PolarsResult<(PrimitiveArray<IdxSize>, PrimitiveArray<IdxSize>)> {
+        let nulls_equal = nulls_equal.first().copied().unwrap_or(false);
         let s_self = self.as_series();
         let (lhs, rhs) = (s_self.to_physical_repr(), other.to_physical_repr());
-        validate.validate_probe(&lhs, &rhs, true, nulls_equal)?;
+        validate.validate_probe(&lhs, &rhs, true, &[nulls_equal])?;
 
         let lhs_dtype = lhs.dtype();
         let rhs_dtype = rhs.dtype();
@@ -390,25 +391,25 @@ pub trait SeriesJoin: SeriesSealed + Sized {
             T::List(_) => {
                 let lhs = &encode_rows_unordered(&[lhs.into_owned().into()])?.into_series();
                 let rhs = &encode_rows_unordered(&[rhs.into_owned().into()])?.into_series();
-                lhs.hash_join_outer(rhs, validate, nulls_equal)
+                lhs.hash_join_outer(rhs, validate, &[nulls_equal])
             },
             #[cfg(feature = "dtype-array")]
             T::Array(_, _) => {
                 let lhs = &encode_rows_unordered(&[lhs.into_owned().into()])?.into_series();
                 let rhs = &encode_rows_unordered(&[rhs.into_owned().into()])?.into_series();
-                lhs.hash_join_outer(rhs, validate, nulls_equal)
+                lhs.hash_join_outer(rhs, validate, &[nulls_equal])
             },
             #[cfg(feature = "dtype-struct")]
             T::Struct(_) => {
                 let lhs = &encode_rows_unordered(&[lhs.into_owned().into()])?.into_series();
                 let rhs = &encode_rows_unordered(&[rhs.into_owned().into()])?.into_series();
-                lhs.hash_join_outer(rhs, validate, nulls_equal)
+                lhs.hash_join_outer(rhs, validate, &[nulls_equal])
             },
             x if x.is_float() => {
                 with_match_physical_float_polars_type!(lhs.dtype(), |$T| {
                     let lhs: &ChunkedArray<$T> = lhs.as_ref().as_ref().as_ref();
                     let rhs: &ChunkedArray<$T> = rhs.as_ref().as_ref().as_ref();
-                    hash_join_outer(lhs, rhs, validate, nulls_equal)
+                    hash_join_outer(lhs, rhs, validate, &[nulls_equal])
                 })
             },
             _ => {
@@ -418,19 +419,21 @@ pub trait SeriesJoin: SeriesSealed + Sized {
 
                 use BitRepr as B;
                 match (lhs, rhs) {
-                    (B::U8(lhs), B::U8(rhs)) => hash_join_outer(&lhs, &rhs, validate, nulls_equal),
+                    (B::U8(lhs), B::U8(rhs)) => {
+                        hash_join_outer(&lhs, &rhs, validate, &[nulls_equal])
+                    },
                     (B::U16(lhs), B::U16(rhs)) => {
-                        hash_join_outer(&lhs, &rhs, validate, nulls_equal)
+                        hash_join_outer(&lhs, &rhs, validate, &[nulls_equal])
                     },
                     (B::U32(lhs), B::U32(rhs)) => {
-                        hash_join_outer(&lhs, &rhs, validate, nulls_equal)
+                        hash_join_outer(&lhs, &rhs, validate, &[nulls_equal])
                     },
                     (B::U64(lhs), B::U64(rhs)) => {
-                        hash_join_outer(&lhs, &rhs, validate, nulls_equal)
+                        hash_join_outer(&lhs, &rhs, validate, &[nulls_equal])
                     },
                     #[cfg(feature = "dtype-u128")]
                     (B::U128(lhs), B::U128(rhs)) => {
-                        hash_join_outer(&lhs, &rhs, validate, nulls_equal)
+                        hash_join_outer(&lhs, &rhs, validate, &[nulls_equal])
                     },
                     _ => {
                         polars_bail!(
@@ -640,13 +643,14 @@ fn hash_join_outer<T>(
     ca_in: &ChunkedArray<T>,
     other: &ChunkedArray<T>,
     validate: JoinValidation,
-    nulls_equal: bool,
+    nulls_equal: &[bool],
 ) -> PolarsResult<(PrimitiveArray<IdxSize>, PrimitiveArray<IdxSize>)>
 where
     T: PolarsNumericType,
     T::Native: TotalHash + TotalEq + ToTotalOrd,
     <T::Native as ToTotalOrd>::TotalOrdItem: Send + Sync + Copy + Hash + Eq + IsNull,
 {
+    let nulls_equal = nulls_equal.first().copied().unwrap_or(false);
     let (a, b, swapped) = det_hash_prone_order!(ca_in, other);
 
     let n_partitions = _set_partition_size();

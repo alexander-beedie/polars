@@ -565,7 +565,7 @@ pub(crate) fn into_py(py: Python<'_>, plan: &IR) -> PyResult<Py<PyAny>> {
                         },
                         _ => name.into_any().unbind(),
                     },
-                    options.args.nulls_equal,
+                    options.args.nulls_equal.clone(),
                     options.args.slice,
                     options.args.suffix().as_str(),
                     options.args.coalesce.coalesce(how),

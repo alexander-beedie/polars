@@ -73,7 +73,23 @@ impl SemiAntiJoinNode {
                 left_key_selectors,
                 right_key_selectors,
                 random_state: PlRandomState::default(),
-                nulls_equal: args.nulls_equal,
+                // Validate uniform null equality settings for multi-key joins
+                nulls_equal: {
+                    if args.nulls_equal.is_empty() {
+                        false
+                    } else if args.nulls_equal.len() == 1 {
+                        args.nulls_equal[0]
+                    } else {
+                        let first = args.nulls_equal[0];
+                        if !args.nulls_equal.iter().all(|&v| v == first) {
+                            polars_bail!(
+                                ComputeError:
+                                "mixed null equality settings for multi-key joins are not yet supported"
+                            );
+                        }
+                        first
+                    }
+                },
                 return_bool,
                 is_anti,
             },

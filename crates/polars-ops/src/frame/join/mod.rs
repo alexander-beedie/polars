@@ -283,7 +283,7 @@ pub trait DataFrameJoinOps: IntoDf {
                     s_right,
                     args.slice,
                     true,
-                    args.nulls_equal,
+                    args.nulls_equal.first().copied().unwrap_or(false),
                 ),
                 #[cfg(feature = "semi_anti_join")]
                 JoinType::Semi => left_df._semi_anti_join_from_series(
@@ -291,7 +291,7 @@ pub trait DataFrameJoinOps: IntoDf {
                     s_right,
                     args.slice,
                     false,
-                    args.nulls_equal,
+                    args.nulls_equal.first().copied().unwrap_or(false),
                 ),
                 #[cfg(feature = "asof_join")]
                 JoinType::AsOf(options) => match (options.left_by, options.right_by) {
@@ -344,8 +344,8 @@ pub trait DataFrameJoinOps: IntoDf {
         } else {
             // Row encode the keys.
             (
-                prepare_keys_multiple(&selected_left, args.nulls_equal)?.into_series(),
-                prepare_keys_multiple(&selected_right, args.nulls_equal)?.into_series(),
+                prepare_keys_multiple(&selected_left, &args.nulls_equal)?.into_series(),
+                prepare_keys_multiple(&selected_right, &args.nulls_equal)?.into_series(),
             )
         };
 
@@ -552,7 +552,7 @@ trait DataFrameJoinOpsPrivate: IntoDf {
     ) -> PolarsResult<DataFrame> {
         let left_df = self.to_df();
         let ((join_tuples_left, join_tuples_right), sorted) =
-            _sort_or_hash_inner(s_left, s_right, verbose, args.validation, args.nulls_equal)?;
+            _sort_or_hash_inner(s_left, s_right, verbose, args.validation, &args.nulls_equal)?;
 
         let mut join_tuples_left = &*join_tuples_left;
         let mut join_tuples_right = &*join_tuples_right;
@@ -629,7 +629,7 @@ trait DataFrameJoinOpsPrivate: IntoDf {
 impl DataFrameJoinOps for DataFrame {}
 impl DataFrameJoinOpsPrivate for DataFrame {}
 
-fn prepare_keys_multiple(s: &[Series], nulls_equal: bool) -> PolarsResult<BinaryOffsetChunked> {
+fn prepare_keys_multiple(s: &[Series], nulls_equal: &[bool]) -> PolarsResult<BinaryOffsetChunked> {
     let keys = s
         .iter()
         .map(|s| {
@@ -644,7 +644,28 @@ fn prepare_keys_multiple(s: &[Series], nulls_equal: bool) -> PolarsResult<Binary
         })
         .collect::<Vec<_>>();
 
-    if nulls_equal {
+    // Determine null handling strategy
+    let nulls_equal_value = if nulls_equal.is_empty() {
+        // Default: nulls are not equal
+        false
+    } else if nulls_equal.len() == 1 {
+        // Single value provided: use it for all keys
+        nulls_equal[0]
+    } else {
+        // Multiple values: validate they're all the same
+        let first = nulls_equal[0];
+        if nulls_equal.iter().all(|&v| v == first) {
+            first
+        } else {
+            polars_bail!(
+                ComputeError:
+                "mixed null equality settings for multi-key joins are not yet supported: \
+                all join keys must have the same `nulls_equal` value"
+            );
+        }
+    };
+
+    if nulls_equal_value {
         encode_rows_vertical_par_unordered(&keys)
     } else {
         encode_rows_vertical_par_unordered_broadcast_nulls(&keys)
@@ -667,7 +688,7 @@ pub fn private_left_join_multiple_keys(
         .map(|c| c.as_materialized_series().clone())
         .collect::<Vec<_>>();
 
-    let a = prepare_keys_multiple(&a_cols, nulls_equal)?.into_series();
-    let b = prepare_keys_multiple(&b_cols, nulls_equal)?.into_series();
-    sort_or_hash_left(&a, &b, false, JoinValidation::ManyToMany, nulls_equal)
+    let a = prepare_keys_multiple(&a_cols, &[nulls_equal])?.into_series();
+    let b = prepare_keys_multiple(&b_cols, &[nulls_equal])?.into_series();
+    sort_or_hash_left(&a, &b, false, JoinValidation::ManyToMany, &[nulls_equal])
 }

@@ -694,7 +694,9 @@ fn visualize_plan_rec(
                 )
                 .unwrap();
             }
-            if args.nulls_equal {
+            // Show join-nulls label if nulls are treated as equal
+            // For multi-key joins, we assume uniform settings (validated elsewhere)
+            if !args.nulls_equal.is_empty() && args.nulls_equal[0] {
                 write!(label, r"\njoin-nulls").unwrap();
             }
             (label, &[*input_left, *input_right][..])

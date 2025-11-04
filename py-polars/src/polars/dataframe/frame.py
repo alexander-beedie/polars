@@ -8035,7 +8035,7 @@ class DataFrame:
         right_on: str | Expr | Sequence[str | Expr] | None = None,
         suffix: str = "_right",
         validate: JoinValidation = "m:m",
-        nulls_equal: bool = False,
+        nulls_equal: bool | Sequence[bool] = False,
         coalesce: bool | None = None,
         maintain_order: MaintainOrderJoin | None = None,
     ) -> DataFrame:
@@ -8103,7 +8103,11 @@ class DataFrame:
                 This is currently not supported by the streaming engine.
 
         nulls_equal
-            Join on null values. By default null values will never produce matches.
+            Consider null values as equal during the join. By default null values
+            will never produce matches.
+
+            * If a single boolean: Applies to all join keys.
+            * If a sequence: Applied per join key (length must match number of keys).
         coalesce
             Coalescing behavior (merging of join columns).
 

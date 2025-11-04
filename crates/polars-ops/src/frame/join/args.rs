@@ -27,7 +27,7 @@ pub struct JoinArgs {
     pub validation: JoinValidation,
     pub suffix: Option<PlSmallStr>,
     pub slice: Option<(i64, usize)>,
-    pub nulls_equal: bool,
+    pub nulls_equal: Vec<bool>,
     pub coalesce: JoinCoalesce,
     pub maintain_order: MaintainOrderJoin,
 }
@@ -125,7 +125,7 @@ impl JoinArgs {
             validation: Default::default(),
             suffix: None,
             slice: None,
-            nulls_equal: false,
+            nulls_equal: vec![],
             coalesce: Default::default(),
             maintain_order: Default::default(),
         }
@@ -349,7 +349,7 @@ impl JoinValidation {
         s_left: &Series,
         s_right: &Series,
         build_shortest_table: bool,
-        nulls_equal: bool,
+        nulls_equal: &[bool],
     ) -> PolarsResult<()> {
         // In default, probe is the left series.
         //
@@ -361,13 +361,16 @@ impl JoinValidation {
         let should_swap = build_shortest_table && s_left.len() <= s_right.len();
         let probe = if should_swap { s_right } else { s_left };
 
+        // For multi-key case, determine if any key considers nulls equal
+        let any_nulls_equal = !nulls_equal.is_empty() && nulls_equal.iter().any(|&b| b);
+
         use JoinValidation::*;
         let valid = match self.swap(should_swap) {
             // Only check the `build` side.
             // The other side use `validate_build` to check
             ManyToMany | ManyToOne => true,
             OneToMany | OneToOne => {
-                if !nulls_equal && probe.null_count() > 0 {
+                if !any_nulls_equal && probe.null_count() > 0 {
                     probe.n_unique()? - 1 == probe.len() - probe.null_count()
                 } else {
                     probe.n_unique()? == probe.len()

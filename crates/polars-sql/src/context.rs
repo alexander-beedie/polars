@@ -483,7 +483,11 @@ impl SQLContext {
                 polars_bail!(SQLInterface: "'{} {}' is not supported", op_name, quantifier.to_string())
             },
         };
-        let join = lf.join_builder().with(rf).how(join_type).join_nulls(true);
+        let join = lf
+            .join_builder()
+            .with(rf)
+            .how(join_type)
+            .join_nulls(vec![true]);
         let joined_tbl = match rf_cols {
             Some(rf_cols) => join.left_on(lf_cols).right_on(rf_cols).finish(),
             None => join.on(lf_cols).finish(),
@@ -1275,7 +1279,7 @@ impl SQLContext {
                                 validation: Default::default(),
                                 suffix: None,
                                 slice: None,
-                                nulls_equal: false,
+                                nulls_equal: vec![false],
                                 coalesce: Default::default(),
                                 maintain_order: polars_ops::frame::MaintainOrderJoin::Left,
                             },

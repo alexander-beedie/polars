@@ -1123,7 +1123,7 @@ fn lower_exprs_with_ctx(
                         validation: Default::default(),
                         suffix: None,
                         slice: None,
-                        nulls_equal,
+                        nulls_equal: vec![nulls_equal],
                         coalesce: Default::default(),
                         maintain_order: Default::default(),
                     },

@@ -2230,7 +2230,7 @@ pub struct JoinBuilder {
     force_parallel: bool,
     suffix: Option<PlSmallStr>,
     validation: JoinValidation,
-    nulls_equal: bool,
+    nulls_equal: Vec<bool>,
     coalesce: JoinCoalesce,
     maintain_order: MaintainOrderJoin,
 }
@@ -2247,7 +2247,7 @@ impl JoinBuilder {
             force_parallel: false,
             suffix: None,
             validation: Default::default(),
-            nulls_equal: false,
+            nulls_equal: vec![],
             coalesce: Default::default(),
             maintain_order: Default::default(),
         }
@@ -2309,7 +2309,11 @@ impl JoinBuilder {
     }
 
     /// Join on null values. By default null values will never produce matches.
-    pub fn join_nulls(mut self, nulls_equal: bool) -> Self {
+    ///
+    /// If a vector is provided, the length must match the number of join keys.
+    /// Each boolean value controls whether nulls are considered equal for the
+    /// corresponding join key.
+    pub fn join_nulls(mut self, nulls_equal: Vec<bool>) -> Self {
         self.nulls_equal = nulls_equal;
         self
     }

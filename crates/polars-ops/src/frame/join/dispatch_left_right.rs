@@ -77,7 +77,7 @@ pub fn materialize_left_join_from_series(
         &s_right,
         verbose,
         args.validation,
-        args.nulls_equal,
+        &args.nulls_equal,
     )?;
 
     let right = if let Some(drop_names) = drop_names {

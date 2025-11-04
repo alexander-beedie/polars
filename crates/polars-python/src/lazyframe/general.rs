@@ -1047,7 +1047,7 @@ impl PyLazyFrame {
         right_on: Vec<PyExpr>,
         allow_parallel: bool,
         force_parallel: bool,
-        nulls_equal: bool,
+        nulls_equal: Vec<bool>,
         how: Wrap<JoinType>,
         suffix: String,
         validate: Wrap<JoinValidation>,

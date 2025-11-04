@@ -179,10 +179,27 @@ async fn select_keys(
         key_columns.push(selector.evaluate(df, state).await?.into_column());
     }
     let keys = unsafe { DataFrame::new_unchecked_with_broadcast(df.height(), key_columns)? };
+
+    // Determine null handling strategy - validate uniform values for multi-key joins
+    let nulls_equal_value = if params.args.nulls_equal.is_empty() {
+        false
+    } else if params.args.nulls_equal.len() == 1 {
+        params.args.nulls_equal[0]
+    } else {
+        let first = params.args.nulls_equal[0];
+        if params.args.nulls_equal.iter().all(|&v| v == first) {
+            first
+        } else {
+            polars_bail!(
+                ComputeError:
+                "mixed null equality settings for multi-key joins are not yet supported"
+            );
+        }
+    };
     Ok(HashKeys::from_df(
         &keys,
         params.random_state.clone(),
-        params.args.nulls_equal,
+        nulls_equal_value,
         false,
     ))
 }
