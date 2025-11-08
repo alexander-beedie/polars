@@ -896,6 +896,30 @@ impl SQLContext {
         Ok(())
     }
 
+    fn register_named_windows(
+        &mut self,
+        named_windows: &[NamedWindowDefinition],
+    ) -> PolarsResult<()> {
+        for NamedWindowDefinition(name, expr) in named_windows {
+            let spec = match expr {
+                NamedWindowExpr::NamedWindow(ref_name) => self
+                    .named_windows
+                    .get(&ref_name.value)
+                    .ok_or_else(|| {
+                        polars_err!(
+                            SQLInterface:
+                            "named window '{}' references undefined window '{}'",
+                            name.value, ref_name.value
+                        )
+                    })?
+                    .clone(),
+                NamedWindowExpr::WindowSpec(spec) => spec.clone(),
+            };
+            self.named_windows.insert(name.value.clone(), spec);
+        }
+        Ok(())
+    }
+
     /// execute the 'FROM' part of the query
     fn execute_from_statement(&mut self, tbl_expr: &TableWithJoins) -> PolarsResult<LazyFrame> {
         let (l_name, mut lf) = self.get_table(&tbl_expr.relation)?;

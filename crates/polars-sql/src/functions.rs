@@ -11,7 +11,8 @@ use polars_lazy::prelude::{RankMethod, RankOptions};
 use polars_ops::chunked_array::UnicodeForm;
 use polars_ops::series::RoundMode;
 use polars_plan::dsl::functions::{
-    as_struct, coalesce, col, cols, concat_str, element, int_range, len, lit, max_horizontal,
+    as_struct,
+    coalesce, col, cols, concat_str, element, int_range, len, lit, max_horizontal,
     min_horizontal, when,
 };
 use polars_plan::plans::{DynLiteralValue, LiteralValue, typed_lit};
@@ -568,12 +569,25 @@ pub(crate) enum PolarsSQLFunctions {
     /// SELECT FIRST(col1) FROM df;
     /// ```
     First,
+    /// SQL 'first_value' window function.
+    /// Returns the first value in an ordered set of values (respecting window frame).
+    /// ```sql
+    /// SELECT FIRST_VALUE(column_1) OVER (PARTITION BY category ORDER BY id) FROM df;
+    /// ```
+    FirstValue,
     /// SQL 'last' function.
     /// Returns the last element of the grouping.
     /// ```sql
     /// SELECT LAST(col1) FROM df;
     /// ```
     Last,
+    /// SQL 'last_value' window function.
+    /// Returns the last value in an ordered set of values (respecting window frame).
+    /// With default frame, returns the current row's value.
+    /// ```sql
+    /// SELECT LAST_VALUE(column_1) OVER (PARTITION BY category ORDER BY id) FROM df;
+    /// ```
+    LastValue,
     /// SQL 'max' function.
     /// Returns the greatest (maximum) of all the elements in the grouping.
     /// ```sql
@@ -999,7 +1013,9 @@ impl PolarsSQLFunctions {
             "covar_pop" => Self::CovarPop,
             "covar" | "covar_samp" => Self::CovarSamp,
             "first" => Self::First,
+            "first_value" => Self::FirstValue,
             "last" => Self::Last,
+            "last_value" => Self::LastValue,
             "max" => Self::Max,
             "median" => Self::Median,
             "quantile_cont" => Self::QuantileCont,
@@ -1529,7 +1545,23 @@ impl SQLFunctionVisitor<'_> {
             CovarPop => self.visit_binary(|a, b| polars_lazy::dsl::cov(a, b, 0)),
             CovarSamp => self.visit_binary(|a, b| polars_lazy::dsl::cov(a, b, 1)),
             First => self.visit_unary(Expr::first),
+            FirstValue => self.visit_unary(Expr::first),
             Last => self.visit_unary(Expr::last),
+            LastValue => {
+                // With the default window frame (ROWS UNBOUNDED PRECEDING TO CURRENT ROW),
+                // LAST_VALUE returns the last value from the start of the partition up
+                // to the current row - which is simply the current row's value.
+                let args = extract_args(function)?;
+                match args.as_slice() {
+                    [FunctionArgExpr::Expr(sql_expr)] => {
+                        parse_sql_expr(sql_expr, self.ctx, self.active_schema)
+                    },
+                    _ => polars_bail!(
+                        SQLSyntax: "LAST_VALUE expects exactly 1 argument, got {}",
+                        args.len()
+                    ),
+                }
+            },
             Max => self.visit_unary_with_opt_cumulative(Expr::max, Expr::cum_max),
             Median => self.visit_unary(Expr::median),
             QuantileCont => {
@@ -2246,6 +2278,32 @@ impl SQLFunctionVisitor<'_> {
         let mut exprs = Vec::with_capacity(order_by.len());
         for o in order_by {
             if all_ascending != o.options.asc.unwrap_or(true) {
+                // TODO: mixed sort directions are not currently supported; we
+                //  need to enhance `over_with_options` to take SortMultipleOptions
+                polars_bail!(
+                    SQLSyntax:
+                    "OVER does not (yet) support mixed asc/desc directions for ORDER BY"
+                )
+            }
+            let expr = parse_sql_expr(&o.expr, self.ctx, self.active_schema)?;
+            exprs.push(expr);
+        }
+        Ok((exprs, !all_ascending))
+    }
+
+    /// Parse ORDER BY (in OVER clause), validating uniform direction.
+    fn parse_order_by_in_window(
+        &mut self,
+        order_by: &[OrderByExpr],
+    ) -> PolarsResult<(Vec<Expr>, bool)> {
+        if order_by.is_empty() {
+            return Ok((Vec::new(), false));
+        }
+        // Parse expressions and validate uniform direction
+        let all_ascending = order_by[0].asc.unwrap_or(true);
+        let mut exprs = Vec::with_capacity(order_by.len());
+        for o in order_by {
+            if all_ascending != o.asc.unwrap_or(true) {
                 // TODO: mixed sort directions are not currently supported; we
                 //  need to enhance `over_with_options` to take SortMultipleOptions
                 polars_bail!(
