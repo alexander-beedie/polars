@@ -64,10 +64,12 @@ def _execute_with_duckdb(
     try:
         import duckdb
     except ImportError:
-        # if not available locally, skip (will always be run on CI)
-        pytest.skip(
-            """DuckDB not installed; required for `assert_sql_matches` with "compare_with='duckdb'"."""
+        msg = (
+            "DuckDB is required for compare_with='duckdb'."
+            "Install with: `pip install duckdb`"
         )
+        raise ImportError(msg) from None
+
     with duckdb.connect(":memory:") as conn:
         for name, df in frames.items():
             conn.register(name, df)
