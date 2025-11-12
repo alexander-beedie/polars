@@ -1,0 +1,47 @@
+/* Railroad diagram styling for SQL syntax documentation */
+
+svg.railroad-diagram {
+    background-color: transparent;
+}
+
+svg.railroad-diagram path {
+    stroke-width: 2;
+    stroke: var(--pst-color-text-base, currentColor);
+    fill: rgba(0, 0, 0, 0);
+}
+
+svg.railroad-diagram text {
+    font: bold 14px monospace;
+    text-anchor: middle;
+    fill: var(--pst-color-text-base, currentColor);
+}
+
+svg.railroad-diagram text.label {
+    text-anchor: start;
+}
+
+svg.railroad-diagram text.comment {
+    font: italic 12px monospace;
+}
+
+svg.railroad-diagram rect {
+    stroke-width: 2;
+    stroke: var(--pst-color-text-base, currentColor);
+    fill: var(--pst-color-primary-bg, hsl(211, 100%, 95%));
+}
+
+svg.railroad-diagram rect.group-box {
+    stroke: var(--pst-color-border, gray);
+    stroke-dasharray: 10 5;
+    fill: none;
+}
+
+.railroad-container {
+    margin: 1.5em 0;
+    overflow-x: auto;
+}
+
+.railroad-container svg {
+    max-width: 100%;
+    height: auto;
+}

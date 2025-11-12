@@ -18,8 +18,9 @@ import sphinx_autosummary_accessors
 # If extensions (or modules to document with autodoc) are in another directory,
 # add these directories to sys.path here.
 
-# Add py-polars directory
+# Add `py-polars` and custom extensions directories
 sys.path.insert(0, str(Path("../..").resolve()))
+sys.path.insert(0, str(Path("_ext").resolve()))
 
 
 # -- Project information -----------------------------------------------------
@@ -48,6 +49,8 @@ extensions = [
     "sphinx_favicon",
     "sphinx_reredirects",
     "sphinx_toolbox.more_autodoc.overloads",
+    # Custom extensions
+    "railroad_diagrams",
 ]
 
 # Render docstring text in `single backticks` as code.

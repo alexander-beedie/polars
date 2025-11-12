@@ -47,6 +47,14 @@ SELECT
 ------
 Select the columns to be returned by the query.
 
+.. railroad::
+
+   select_stmt ::= 'SELECT' distinct? select_list
+                   'FROM' table_reference
+
+   distinct ::= 'DISTINCT'
+   select_list ::= '*' | column_expr (',' column_expr)*
+
 **Example:**
 
 .. code-block:: python
@@ -81,6 +89,10 @@ Select the columns to be returned by the query.
 DISTINCT
 --------
 Returns unique values from a query.
+
+.. railroad::
+
+   distinct_clause ::= 'SELECT' 'DISTINCT'? select_list
 
 **Example:**
 
@@ -157,6 +169,10 @@ also be used as the leading clause in a query, supporting the following variatio
 * ``FROM tbl`` - equivalent to ``SELECT * FROM tbl``.
 * ``FROM tbl SELECT ...`` - a reordered ``SELECT`` with explicit projections.
 
+.. railroad::
+
+   from_clause ::= 'FROM' table_reference
+
 **Example:**
 
 .. code-block:: python
@@ -208,13 +224,25 @@ JOIN
 ----
 Combines rows from two or more tables based on a related column.
 
-**Join Types**
+.. railroad::
+
+   join_clause ::= table_reference join_type 'JOIN' table_reference
+                   join_constraint
+
+   join_type ::= 'CROSS'
+               | 'NATURAL'? ('FULL' | 'LEFT' | 'RIGHT' | 'INNER')?
+               | ('LEFT' | 'RIGHT')? ('SEMI' | 'ANTI')
+
+   join_constraint ::= 'ON' condition | 'USING' '(' column_list ')'
+
+**Supported Join Types**
 
 * `CROSS JOIN`
 * `[NATURAL] FULL [OUTER] JOIN`
 * `[NATURAL] INNER [OUTER] JOIN`
 * `[NATURAL] LEFT [OUTER] JOIN`
 * `[NATURAL] RIGHT [OUTER] JOIN`
+* `[NATURAL] RIGHT JOIN`
 * `[LEFT | RIGHT] ANTI JOIN`
 * `[LEFT | RIGHT] SEMI JOIN`
 
@@ -271,6 +299,12 @@ WHERE
 
 Filter rows returned from the query based on the given conditions.
 
+.. railroad::
+
+   where_clause ::= 'WHERE' condition
+
+**Example:**
+
 .. code-block:: python
 
     df = pl.DataFrame(
@@ -296,6 +330,10 @@ Filter rows returned from the query based on the given conditions.
 GROUP BY
 --------
 Group rows that have the same values in specified columns into summary rows.
+
+.. railroad::
+
+   group_by_clause ::= 'GROUP BY' expr (',' expr)*
 
 **Example:**
 
@@ -362,6 +400,12 @@ shorthand that avoids having to manually repeat column names in the ``GROUP BY``
 HAVING
 ------
 Filter groups in a `GROUP BY` based on the given conditions.
+
+.. railroad::
+
+   having_clause ::= 'HAVING' condition
+
+**Example:**
 
 .. code-block:: python
 
@@ -505,6 +549,13 @@ ORDER BY
 --------
 Sort the query result based on one or more specified columns.
 
+.. railroad::
+
+   order_by_clause ::= 'ORDER BY' ('ALL' sort_modifiers? | order_expr+)
+
+   order_expr ::= expr sort_modifiers?
+   sort_modifiers ::= ('ASC' | 'DESC')? ('NULLS' ('FIRST' | 'LAST'))?
+
 **Example:**
 
 .. code-block:: python
@@ -613,6 +664,10 @@ LIMIT
 -----
 Limit the number of rows returned by the query.
 
+.. railroad::
+
+   limit_clause ::= 'LIMIT' integer
+
 **Example:**
 
 .. code-block:: python
@@ -643,6 +698,10 @@ FETCH
 Limit the number of rows returned by the query; this is the ANSI SQL standard
 alternative to the ``LIMIT`` clause, and can be combined with ``OFFSET``. The
 `WITH TIES` and `PERCENT` modifiers are not currently supported.
+
+.. railroad::
+
+   offset_clause ::= 'OFFSET' integer
 
 **Example:**
 
