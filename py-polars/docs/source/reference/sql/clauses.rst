@@ -39,6 +39,14 @@ SELECT
 ------
 Select the columns to be returned by the query.
 
+.. railroad::
+
+   select_stmt ::= 'SELECT' distinct? select_list
+                   'FROM' table_reference
+
+   distinct ::= 'DISTINCT'
+   select_list ::= '*' | column_expr (',' column_expr)*
+
 **Example:**
 
 .. code-block:: python
@@ -69,6 +77,10 @@ DISTINCT
 --------
 Returns unique values from a query.
 
+.. railroad::
+
+   distinct_clause ::= 'SELECT' 'DISTINCT'? select_list
+
 **Example:**
 
 .. code-block:: python
@@ -97,6 +109,10 @@ Returns unique values from a query.
 FROM
 ----
 Specifies the table(s) from which to retrieve or delete data.
+
+.. railroad::
+
+   from_clause ::= 'FROM' table_reference
 
 **Example:**
 
@@ -128,12 +144,24 @@ JOIN
 ----
 Combines rows from two or more tables based on a related column.
 
-**Join Types**
+.. railroad::
+
+   join_clause ::= table_reference join_type 'JOIN' table_reference
+                   join_constraint
+
+   join_type ::= 'CROSS'
+               | 'NATURAL'? ('FULL' | 'LEFT' | 'RIGHT' | 'INNER')?
+               | ('LEFT' | 'RIGHT')? ('SEMI' | 'ANTI')
+
+   join_constraint ::= 'ON' condition | 'USING' '(' column_list ')'
+
+**Supported Join Types**
 
 * `CROSS JOIN`
 * `[NATURAL] FULL JOIN`
 * `[NATURAL] INNER JOIN`
 * `[NATURAL] LEFT JOIN`
+* `[NATURAL] RIGHT JOIN`
 * `[LEFT | RIGHT] ANTI JOIN`
 * `[LEFT | RIGHT] SEMI JOIN`
 
@@ -190,6 +218,12 @@ WHERE
 
 Filter rows returned from the query based on the given conditions.
 
+.. railroad::
+
+   where_clause ::= 'WHERE' condition
+
+**Example:**
+
 .. code-block:: python
 
     df = pl.DataFrame(
@@ -215,6 +249,10 @@ Filter rows returned from the query based on the given conditions.
 GROUP BY
 --------
 Group rows that have the same values in specified columns into summary rows.
+
+.. railroad::
+
+   group_by_clause ::= 'GROUP BY' expr (',' expr)*
 
 **Example:**
 
@@ -244,6 +282,12 @@ Group rows that have the same values in specified columns into summary rows.
 HAVING
 ------
 Filter groups in a `GROUP BY` based on the given conditions.
+
+.. railroad::
+
+   having_clause ::= 'HAVING' condition
+
+**Example:**
 
 .. code-block:: python
 
@@ -387,6 +431,13 @@ ORDER BY
 --------
 Sort the query result based on one or more specified columns.
 
+.. railroad::
+
+   order_by_clause ::= 'ORDER BY' ('ALL' sort_modifiers? | order_expr+)
+
+   order_expr ::= expr sort_modifiers?
+   sort_modifiers ::= ('ASC' | 'DESC')? ('NULLS' ('FIRST' | 'LAST'))?
+
 **Example:**
 
 .. code-block:: python
@@ -418,6 +469,10 @@ LIMIT
 -----
 Limit the number of rows returned by the query.
 
+.. railroad::
+
+   limit_clause ::= 'LIMIT' integer
+
 **Example:**
 
 .. code-block:: python
@@ -446,6 +501,10 @@ Limit the number of rows returned by the query.
 OFFSET
 ------
 Skip a number of rows before starting to return rows from the query.
+
+.. railroad::
+
+   offset_clause ::= 'OFFSET' integer
 
 **Example:**
 

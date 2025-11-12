@@ -90,6 +90,12 @@ COUNT
 -----
 Returns the amount of elements in the grouping.
 
+.. railroad::
+
+   count_expr ::= 'COUNT' '(' ('*' | distinct? expression) ')'
+
+   distinct ::= 'DISTINCT'
+
 **Example:**
 
 .. code-block:: python
