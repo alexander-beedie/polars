@@ -4,6 +4,7 @@
 mod context;
 pub mod function_registry;
 mod functions;
+mod helpers;
 pub mod keywords;
 mod sql_expr;
 mod table_functions;

@@ -1,4 +1,4 @@
-use std::ops::{ControlFlow, Deref};
+use std::ops::Deref;
 
 use polars_core::frame::row::Row;
 use polars_core::prelude::*;
@@ -12,12 +12,13 @@ use sqlparser::ast::{
     FunctionArg, GroupByExpr, Ident, JoinConstraint, JoinOperator, ObjectName, ObjectType, Offset,
     OrderBy, Query, RenameSelectItem, Select, SelectItem, SetExpr, SetOperator, SetQuantifier,
     Statement, TableAlias, TableFactor, TableWithJoins, UnaryOperator, Value as SQLValue, Values,
-    Visit, Visitor, WildcardAdditionalOptions,
+    WildcardAdditionalOptions,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::{Parser, ParserOptions};
 
 use crate::function_registry::{DefaultFunctionRegistry, FunctionRegistry};
+use crate::helpers::{expr_cols_all_in_schema, expr_refers_to_table, is_literal_only_select};
 use crate::sql_expr::{
     parse_sql_array, parse_sql_expr, resolve_compound_identifier, to_sql_interface_err,
 };
@@ -821,6 +822,24 @@ impl SQLContext {
 
         let projections = self.column_projections(select_stmt, &schema, &mut select_modifiers)?;
 
+        // Handle the edge case where SELECT contains only literals/constants.
+        // In standard SQL, these should broadcast to table height (unlike DataFrame API which returns 1 row).
+        // We inject a temporary column from the schema to trigger broadcasting, then drop it at the end.
+        let broadcast_helper_col = if !select_stmt.from.is_empty()
+            && is_literal_only_select(select_stmt)
+            && !schema.is_empty()
+        {
+            let temp_name = PlSmallStr::from_static("__POLARS_LITERAL_BROADCAST_HELPER");
+            if let Some(first_col_name) = schema.iter_names().next() {
+                lf = lf.with_columns([col(first_col_name.clone()).alias(temp_name.clone())]);
+                Some(temp_name)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Check for "GROUP BY ..." (after determining projections)
         let mut group_by_keys: Vec<Expr> = Vec::new();
         match &select_stmt.group_by {
@@ -1018,16 +1037,33 @@ impl SQLContext {
 
                 // DISTINCT ON has to apply the ORDER BY before the operation.
                 lf = self.process_order_by(lf, &query.order_by, None)?;
-                return Ok(lf.unique_stable(
+                lf = lf.unique_stable(
                     Some(Selector::ByName {
                         names: cols.into(),
                         strict: true,
                     }),
                     UniqueKeepStrategy::First,
-                ));
+                );
+                // Drop the temporary broadcast helper column if it was injected
+                if let Some(temp_name) = broadcast_helper_col {
+                    lf = lf.drop(Selector::ByName {
+                        names: vec![temp_name].into(),
+                        strict: false,
+                    });
+                }
+                return Ok(lf);
             },
             None => lf,
         };
+
+        // Drop the temporary broadcast helper column if it was injected
+        if let Some(temp_name) = broadcast_helper_col {
+            lf = lf.drop(Selector::ByName {
+                names: vec![temp_name].into(),
+                strict: false,
+            });
+        }
+
         Ok(lf)
     }
 
@@ -1732,52 +1768,6 @@ fn expand_exprs(expr: Expr, schema: &SchemaRef) -> Vec<Expr> {
 
 fn is_regex_colname(nm: &str) -> bool {
     nm.starts_with('^') && nm.ends_with('$')
-}
-
-/// Visitor that checks if an expression tree contains a reference to a specific table.
-struct FindTableIdentifier<'a> {
-    table_name: &'a str,
-    found: bool,
-}
-
-impl<'a> Visitor for FindTableIdentifier<'a> {
-    type Break = ();
-
-    fn pre_visit_expr(&mut self, expr: &SQLExpr) -> ControlFlow<Self::Break> {
-        if let SQLExpr::CompoundIdentifier(idents) = expr {
-            if idents.len() >= 2 && idents[0].value.as_str() == self.table_name {
-                self.found = true; // return immediately on first match
-                return ControlFlow::Break(());
-            }
-        }
-        ControlFlow::Continue(())
-    }
-}
-
-/// Check if all columns referred to in a Polars expression exist in the given Schema.
-fn expr_cols_all_in_schema(expr: &Expr, schema: &Schema) -> bool {
-    let mut found_cols = false;
-    let mut all_in_schema = true;
-    for e in expr.into_iter() {
-        if let Expr::Column(name) = e {
-            found_cols = true;
-            if !schema.contains(name.as_str()) {
-                all_in_schema = false;
-                break;
-            }
-        }
-    }
-    found_cols && all_in_schema
-}
-
-/// Check if a SQL expression contains a reference to a specific table.
-fn expr_refers_to_table(expr: &SQLExpr, table_name: &str) -> bool {
-    let mut table_finder = FindTableIdentifier {
-        table_name,
-        found: false,
-    };
-    let _ = expr.visit(&mut table_finder);
-    table_finder.found
 }
 
 /// Determine which parsed join expressions actually belong in `left_om` and which in `right_on`.
