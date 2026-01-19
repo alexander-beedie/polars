@@ -138,6 +138,7 @@ dtype-decimal = [
   "polars-expr/dtype-decimal",
   "polars-stream?/dtype-decimal",
   "polars-mem-engine/dtype-decimal",
+  "polars-stream?/dtype-decimal",
 ]
 dtype-duration = [
   "polars-plan/dtype-duration",
