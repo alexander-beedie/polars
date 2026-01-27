@@ -10,12 +10,11 @@ use polars_utils::aliases::{PlHashSet, PlIndexSet};
 use polars_utils::format_pl_smallstr;
 use sqlparser::ast::{
     BinaryOperator, CreateTable, CreateTableLikeKind, Delete, Distinct, ExcludeSelectItem,
-    Expr as SQLExpr, FromTable, FunctionArg, GroupByExpr, Ident, JoinConstraint, JoinOperator,
-    LimitClause, NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectType, OrderBy,
-    OrderByKind, Query, RenameSelectItem, Select, SelectItem, SelectItemQualifiedWildcardKind,
-    SetExpr, SetOperator, SetQuantifier, Statement, TableAlias, TableFactor, TableWithJoins,
-    Truncate, UnaryOperator, Value as SQLValue, ValueWithSpan, Values, Visit,
-    WildcardAdditionalOptions, WindowSpec,
+    Expr as SQLExpr, Fetch, FromTable, FunctionArg, GroupByExpr, Ident, JoinConstraint,
+    JoinOperator, LimitClause, NamedWindowDefinition, NamedWindowExpr, ObjectName, ObjectType, OrderBy, OrderByKind, Query, RenameSelectItem, Select, SelectItem,
+    SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Statement, TableAlias,
+    TableFactor, TableWithJoins, Truncate, UnaryOperator, Value as SQLValue, ValueWithSpan, Values,
+    Visit, WildcardAdditionalOptions, WindowSpec,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::{Parser, ParserOptions};
@@ -304,23 +303,10 @@ impl SQLContext {
     }
 
     pub(crate) fn execute_query_no_ctes(&mut self, query: &Query) -> PolarsResult<LazyFrame> {
+        self.validate_query(query)?;
+
         let lf = self.process_query(&query.body, query)?;
-        let (limit, offset) = match &query.limit_clause {
-            Some(LimitClause::LimitOffset {
-                limit,
-                offset,
-                limit_by,
-            }) => {
-                if !limit_by.is_empty() {
-                    // specialised clickhouse syntax
-                    polars_bail!(SQLSyntax: "LIMIT BY clause is not supported");
-                }
-                (limit.as_ref(), offset.as_ref().map(|o| &o.value))
-            },
-            Some(LimitClause::OffsetCommaLimit { offset, limit }) => (Some(limit), Some(offset)),
-            None => (None, None),
-        };
-        self.process_limit_offset(lf, limit, offset)
+        self.process_limit_offset(lf, &query.limit_clause, &query.fetch)
     }
 
     pub(crate) fn get_frame_schema(&mut self, frame: &mut LazyFrame) -> PolarsResult<SchemaRef> {
@@ -485,7 +471,10 @@ impl SQLContext {
     fn process_query(&mut self, expr: &SetExpr, query: &Query) -> PolarsResult<LazyFrame> {
         match expr {
             SetExpr::Select(select_stmt) => self.execute_select(select_stmt, query),
-            SetExpr::Query(query) => self.execute_query_no_ctes(query),
+            SetExpr::Query(nested_query) => {
+                let lf = self.execute_query_no_ctes(nested_query)?;
+                self.process_order_by(lf, &query.order_by, None)
+            },
             SetExpr::SetOperation {
                 op: SetOperator::Union,
                 set_quantifier,
@@ -568,7 +557,8 @@ impl SQLContext {
             Some(rf_cols) => join.left_on(lf_cols).right_on(rf_cols).finish(),
             None => join.on(lf_cols).finish(),
         };
-        Ok(joined_tbl.unique(None, UniqueKeepStrategy::Any))
+        let lf = joined_tbl.unique(None, UniqueKeepStrategy::Any);
+        self.process_order_by(lf, &query.order_by, None)
     }
 
     fn process_union(
@@ -636,7 +626,8 @@ impl SQLContext {
             },
         );
 
-        Ok(lf.pipe_with_schemas(vec![rf], cb))
+        let lf = lf.pipe_with_schemas(vec![rf], cb);
+        self.process_order_by(lf, &query.order_by, None)
     }
 
     /// Process UNNEST as a lateral operation when it contains column references
@@ -1069,6 +1060,41 @@ impl SQLContext {
         polars_ensure!(sort_by.is_empty(), SQLInterface: "`SORT BY` clause is not supported; use `ORDER BY` instead");
         polars_ensure!(top.is_none(), SQLInterface: "`TOP` clause is not supported; use `LIMIT` instead");
         polars_ensure!(value_table_mode.is_none(), SQLInterface: "`SELECT AS VALUE/STRUCT` is not supported");
+
+        Ok(())
+    }
+
+    /// Check that the QUERY only contains supported clauses.
+    fn validate_query(&self, query: &Query) -> PolarsResult<()> {
+        // As with "Select" validation (above) destructure "Query" exhaustively
+        let Query {
+            // Supported clauses
+            with: _,
+            body: _,
+            order_by: _,
+            limit_clause: _,
+            fetch,
+
+            // Unsupported clauses
+            for_clause,
+            format_clause,
+            locks,
+            pipe_operators,
+            settings,
+        } = query;
+
+        // Validate FETCH clause options (if present)
+        if let Some(fetch) = fetch {
+            polars_ensure!(!fetch.percent, SQLInterface: "`FETCH` with `PERCENT` is not supported");
+            polars_ensure!(!fetch.with_ties, SQLInterface: "`FETCH` with `WITH TIES` is not supported");
+        }
+
+        // Raise specific error messages for unsupported attributes
+        polars_ensure!(for_clause.is_none(), SQLInterface: "`FOR` clause is not supported");
+        polars_ensure!(format_clause.is_none(), SQLInterface: "`FORMAT` clause is not supported");
+        polars_ensure!(locks.is_empty(), SQLInterface: "`FOR UPDATE/SHARE` locking clause is not supported");
+        polars_ensure!(pipe_operators.is_empty(), SQLInterface: "pipe operators are not supported");
+        polars_ensure!(settings.is_none(), SQLInterface: "`SETTINGS` clause is not supported");
 
         Ok(())
     }
@@ -2174,9 +2200,35 @@ impl SQLContext {
     fn process_limit_offset(
         &self,
         lf: LazyFrame,
-        limit: Option<&SQLExpr>,
-        offset: Option<&SQLExpr>,
+        limit_clause: &Option<LimitClause>,
+        fetch: &Option<Fetch>,
     ) -> PolarsResult<LazyFrame> {
+        // Extract limit and offset from LimitClause
+        let (limit, offset) = match limit_clause {
+            Some(LimitClause::LimitOffset {
+                limit,
+                offset,
+                limit_by,
+            }) => {
+                if !limit_by.is_empty() {
+                    polars_bail!(SQLSyntax: "LIMIT BY clause is not supported");
+                }
+                (limit.as_ref(), offset.as_ref().map(|o| &o.value))
+            },
+            Some(LimitClause::OffsetCommaLimit { offset, limit }) => (Some(limit), Some(offset)),
+            None => (None, None),
+        };
+
+        // Handle FETCH clause (alternative to LIMIT, mutually exclusive)
+        let limit = match (fetch, limit) {
+            (Some(fetch), None) => fetch.quantity.as_ref(),
+            (Some(_), Some(_)) => {
+                polars_bail!(SQLSyntax: "cannot use both `LIMIT` and `FETCH` in the same query")
+            },
+            (None, limit) => limit,
+        };
+
+        // Apply limit and/or offset
         match (offset, limit) {
             (
                 Some(SQLExpr::Value(ValueWithSpan {
@@ -2191,9 +2243,9 @@ impl SQLContext {
                 offset
                     .parse()
                     .map_err(|e| polars_err!(SQLInterface: "OFFSET conversion error: {}", e))?,
-                limit
-                    .parse()
-                    .map_err(|e| polars_err!(SQLInterface: "LIMIT conversion error: {}", e))?,
+                limit.parse().map_err(
+                    |e| polars_err!(SQLInterface: "LIMIT/FETCH conversion error: {}", e),
+                )?,
             )),
             (
                 Some(SQLExpr::Value(ValueWithSpan {
@@ -2213,14 +2265,14 @@ impl SQLContext {
                     value: SQLValue::Number(limit, _),
                     ..
                 })),
-            ) => Ok(lf.limit(
-                limit
-                    .parse()
-                    .map_err(|e| polars_err!(SQLInterface: "LIMIT conversion error: {}", e))?,
-            )),
+            ) => {
+                Ok(lf.limit(limit.parse().map_err(
+                    |e| polars_err!(SQLInterface: "LIMIT/FETCH conversion error: {}", e),
+                )?))
+            },
             (None, None) => Ok(lf),
             _ => polars_bail!(
-                SQLSyntax: "non-numeric arguments for LIMIT/OFFSET are not supported",
+                SQLSyntax: "non-numeric arguments for LIMIT/OFFSET/FETCH are not supported",
             ),
         }
     }

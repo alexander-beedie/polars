@@ -27,6 +27,8 @@ sqlparser = { workspace = true }
 [dev-dependencies]
 # to display dataframes in case of test failures
 polars-core = { workspace = true, features = ["fmt"] }
+# required for GROUP BY streaming execution in tests (iss_23134)
+polars-lazy = { workspace = true, features = ["new_streaming"] }
 
 [features]
 default = []
