@@ -424,8 +424,10 @@ class Selector(Expr):
             return dtype_selector | selector
 
     @classmethod
-    def _by_name(cls, names: builtins.list[str], *, strict: bool) -> Selector:
-        return cls._from_pyselector(PySelector.by_name(names, strict))
+    def _by_name(
+        cls, names: builtins.list[str], *, strict: bool, expand_patterns: bool
+    ) -> Selector:
+        return cls._from_pyselector(PySelector.by_name(names, strict, expand_patterns))
 
     def __invert__(cls) -> Selector:
         """Invert the selector."""
@@ -1266,7 +1268,7 @@ def by_name(*names: str | Collection[str], require_all: bool = True) -> Selector
             msg = f"invalid name: {nm!r}"
             raise TypeError(msg)
 
-    return Selector._by_name(all_names, strict=require_all)
+    return Selector._by_name(all_names, strict=require_all, expand_patterns=False)
 
 
 def empty() -> Selector:

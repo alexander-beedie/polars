@@ -2147,7 +2147,7 @@ impl LazyGroupBy {
             .collect::<Vec<_>>();
 
         self.agg([all().as_expr().head(n)]).explode_impl(
-            all() - by_name(keys.iter().cloned(), false),
+            all() - by_name(keys.iter().cloned(), false, false),
             ExplodeOptions {
                 empty_as_null: true,
                 keep_nulls: true,
@@ -2165,7 +2165,7 @@ impl LazyGroupBy {
             .collect::<Vec<_>>();
 
         self.agg([all().as_expr().tail(n)]).explode_impl(
-            all() - by_name(keys.iter().cloned(), false),
+            all() - by_name(keys.iter().cloned(), false, false),
             ExplodeOptions {
                 empty_as_null: true,
                 keep_nulls: true,

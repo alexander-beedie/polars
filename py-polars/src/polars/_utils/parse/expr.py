@@ -144,9 +144,9 @@ def parse_into_selector(
     raise_if_not_selector: bool = True,
 ) -> pl.Selector | None:
     if isinstance(i, str):
-        import polars.selectors as cs
-
-        return cs.by_name([i], require_all=strict)
+        # Use expand_patterns=True so that "*" and "^...$" patterns work
+        # when column names are passed to methods like explode, unnest, etc.
+        return pl.Selector._by_name([i], strict=strict, expand_patterns=True)
     elif isinstance(i, pl.Selector):
         return i
     elif isinstance(i, pl.Expr):
@@ -163,16 +163,22 @@ def parse_list_into_selector(
     strict: bool = True,
 ) -> pl.Selector:
     if isinstance(inputs, Collection) and not isinstance(inputs, str):
-        import polars.selectors as cs
-
-        columns = list(filter(lambda i: isinstance(i, str), inputs))
-        selector = cs.by_name(columns, require_all=strict)  # type: ignore[arg-type]
+        columns: list[str] = [i for i in inputs if isinstance(i, str)]
+        # Use expand_patterns=True so that "*" and "^...$" patterns work
+        # when column names are passed to methods like explode, unnest, etc.
+        selector = pl.Selector._by_name(
+            columns,
+            strict=strict,
+            expand_patterns=True,
+        )
 
         if len(columns) == len(inputs):
             return selector
 
         # A bit cleaner
         if len(columns) == 0:
+            import polars.selectors as cs
+
             selector = cs.empty()
 
         for i in inputs:
