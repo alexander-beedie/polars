@@ -131,3 +131,15 @@ TEMPORAL_DTYPES: Final[frozenset[PolarsTemporalType]] = DataTypeGroup(
 )
 
 NESTED_DTYPES: Final[frozenset[PolarsDataType]] = DataTypeGroup([List, Struct, Array])
+
+# mapping of signed to unsigned integer types, and vice versa
+SIGNED_UNSIGNED_INTEGER_LOOKUP: dict[PolarsDataType, PolarsDataType] = {
+    Int8: UInt8,
+    Int16: UInt16,
+    Int32: UInt32,
+    Int64: UInt64,
+    UInt8: Int8,
+    UInt16: Int16,
+    UInt32: Int32,
+    UInt64: Int64,
+}

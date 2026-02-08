@@ -5206,7 +5206,7 @@ Consider using {self}.implode() instead"""
         ...         "values": [[1, 2], [2, 3], [4]],
         ...     }
         ... )
-        >>> df.group_by("group").agg(pl.col("values").flatten())  # doctest: +SKIP
+        >>> df.group_by("group", maintain_order=True).agg(pl.col("values").flatten())
         shape: (2, 2)
         ┌───────┬───────────┐
         │ group ┆ values    │

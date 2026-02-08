@@ -41,7 +41,6 @@ from polars.datatypes.convert import is_polars_dtype
 if TYPE_CHECKING:
     from polars._typing import PolarsDataType, PythonDataType, SchemaDict
 
-
 def parse_into_datatype_expr(input: Any) -> pl.DataTypeExpr:
     """Parse an input into a DataTypeExpr."""
     if isinstance(input, pl.DataTypeExpr):
@@ -88,6 +87,7 @@ def parse_py_type_into_dtype(input: PythonDataType | type[object]) -> PolarsData
         return String()
     elif input is bool:
         return Boolean()
+    # note: `datetime` is a subclass of `date`, so need to check `datetime` first
     elif isinstance(input, type) and issubclass(input, datetime):  # type: ignore[redundant-expr]
         return Datetime("us")
     elif isinstance(input, type) and issubclass(input, date):  # type: ignore[redundant-expr]
