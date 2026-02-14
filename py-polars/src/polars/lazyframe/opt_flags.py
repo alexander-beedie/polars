@@ -238,7 +238,7 @@ class QueryOptFlags:
     def fast_projection(self, value: bool) -> None:
         self._pyoptflags.fast_projection = value
 
-    def __str__(self) -> str:
+    def __repr__(self) -> str:
         return f"""
 QueryOptFlags {{
     type_coercion: {self._pyoptflags.type_coercion}
