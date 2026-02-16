@@ -2,10 +2,10 @@ use polars_core::prelude::{AnyValue, DataType, IntoColumn};
 use polars_core::utils::last_non_null;
 use polars_error::{PolarsResult, polars_bail};
 #[cfg(feature = "dtype-decimal")]
-use polars_ops::series::cum_mean_decimal_with_init;
+use polars_ops::series::{CumMeanDecimalState, cum_mean_decimal_with_init};
 use polars_ops::series::{
-    cum_count_with_init, cum_max_with_init, cum_mean_with_init, cum_min_with_init,
-    cum_prod_with_init, cum_sum_with_init,
+    CumMeanFloatState, cum_count_with_init, cum_max_with_init, cum_mean_with_init,
+    cum_min_with_init, cum_prod_with_init, cum_sum_with_init,
 };
 
 use super::ComputeNode;
@@ -27,16 +27,9 @@ pub enum CumAggState {
 
 #[derive(Debug, Clone)]
 pub enum CumMeanState {
-    Float {
-        sum: f64,
-        count: u64,
-        err: f64,
-    },
+    Float(CumMeanFloatState),
     #[cfg(feature = "dtype-decimal")]
-    Decimal {
-        sum: i128,
-        count: u64,
-    },
+    Decimal(CumMeanDecimalState),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -55,13 +48,11 @@ impl CumAggNode {
         let state = match kind {
             #[cfg(feature = "dtype-decimal")]
             CumAggKind::Mean if matches!(dtype, DataType::Decimal(_, _)) => {
-                CumAggState::Mean(CumMeanState::Decimal { sum: 0, count: 0 })
+                CumAggState::Mean(CumMeanState::Decimal(CumMeanDecimalState::default()))
             },
-            CumAggKind::Mean => CumAggState::Mean(CumMeanState::Float {
-                sum: 0.0,
-                count: 0,
-                err: 0.0,
-            }),
+            CumAggKind::Mean => {
+                CumAggState::Mean(CumMeanState::Float(CumMeanFloatState::default()))
+            },
             _ => CumAggState::Single(AnyValue::Null),
         };
         Self { state, kind }
@@ -116,24 +107,21 @@ impl ComputeNode for CumAggNode {
                 let out = match (&mut self.state, self.kind) {
                     (CumAggState::Mean(mean_state), CumAggKind::Mean) => match mean_state {
                         #[cfg(feature = "dtype-decimal")]
-                        CumMeanState::Decimal { sum, count } => {
-                            let (out, new_sum, new_count) =
-                                cum_mean_decimal_with_init(s, false, Some(*sum), Some(*count))?;
-                            *sum = new_sum;
-                            *count = new_count;
+                        CumMeanState::Decimal(state) => {
+                            let (out, new_state) =
+                                cum_mean_decimal_with_init(s, false, Some(*state))?;
+                            *state = new_state;
                             out
                         },
                         #[cfg(feature = "dtype-decimal")]
-                        CumMeanState::Float { .. } if matches!(s.dtype(), DataType::Decimal(_, _)) =>
+                        CumMeanState::Float(_) if matches!(s.dtype(), DataType::Decimal(_, _)) =>
                         {
                             polars_bail!(InvalidOperation: "incorrect state type; expected MeanState::Decimal")
                         },
-                        CumMeanState::Float { sum, count, err } => {
-                            let (out, new_sum, new_count, new_err) =
-                                cum_mean_with_init(s, false, Some(*sum), Some(*count), Some(*err))?;
-                            *sum = new_sum;
-                            *count = new_count;
-                            *err = new_err;
+                        CumMeanState::Float(state) => {
+                            let (out, new_state) =
+                                cum_mean_with_init(s, false, Some(*state))?;
+                            *state = new_state;
                             out
                         },
                     },
