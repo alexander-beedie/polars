@@ -12,35 +12,18 @@ use polars_utils::float::IsFloat;
 use polars_utils::kahan_sum::KahanSum;
 use polars_utils::min_max::MinMax;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct CumMeanFloatState {
     pub sum: f64,
     pub count: u64,
     pub err: f64,
 }
 
-impl Default for CumMeanFloatState {
-    fn default() -> Self {
-        Self {
-            sum: 0.0,
-            count: 0,
-            err: 0.0,
-        }
-    }
-}
-
 #[cfg(feature = "dtype-decimal")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct CumMeanDecimalState {
     pub sum: i128,
     pub count: u64,
-}
-
-#[cfg(feature = "dtype-decimal")]
-impl Default for CumMeanDecimalState {
-    fn default() -> Self {
-        Self { sum: 0, count: 0 }
-    }
 }
 
 fn det_max<T>(state: &mut T, v: Option<T>) -> Option<Option<T>>
