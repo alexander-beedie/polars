@@ -1784,6 +1784,11 @@ class Expr:
 
         Only works on floating point Series.
 
+        See Also
+        --------
+        ceil : Round up to the nearest integer value.
+        round : Round to the nearest integer.
+
         Examples
         --------
         >>> df = pl.DataFrame({"a": [0.3, 0.5, 1.0, 1.1]})
@@ -1807,6 +1812,11 @@ class Expr:
         Rounds up to the nearest integer value.
 
         Only works on floating point Series.
+
+        See Also
+        --------
+        floor : Round down to the nearest integer.
+        round : Round to the nearest integer.
 
         Examples
         --------
@@ -1843,6 +1853,13 @@ class Expr:
                 round to the nearest even number
             * *half_away_from_zero*
                 round to the nearest number away from zero
+
+        See Also
+        --------
+        ceil : Round up to the nearest integer.
+        floor : Round down to the nearest integer.
+        round_sig_figs : Round to a given number of significant figures.
+        truncate : Truncate to a given number of decimals.
 
         Examples
         --------
@@ -1898,6 +1915,13 @@ class Expr:
         digits
             Number of significant figures to round to.
 
+        See Also
+        --------
+        ceil : Round up to the nearest integer.
+        floor : Round down to the nearest integer.
+        round : Round to a given number of decimals.
+        truncate : Truncate to a given number of decimals.
+
         Examples
         --------
         >>> df = pl.DataFrame({"a": [0.01234, 3.333, 1234.0]})
@@ -1914,6 +1938,49 @@ class Expr:
         └─────────┴────────────────┘
         """
         return wrap_expr(self._pyexpr.round_sig_figs(digits))
+
+    def truncate(self, decimals: int = 0) -> Expr:
+        """
+        Truncate numeric data toward zero to `decimals` decimal places.
+
+        Parameters
+        ----------
+        decimals
+            Number of decimal places to truncate to.
+
+        Notes
+        -----
+        This method performs numeric truncation. For truncating temporal
+        data (dates/datetimes), use :func:`Expr.dt.truncate` instead.
+
+        See Also
+        --------
+        ceil : Round up to the nearest integer.
+        floor : Round down to the nearest integer.
+        round : Round to a given number of decimals.
+        round_sig_figs : Round to a given number of significant figures.
+
+        Examples
+        --------
+        >>> df = pl.DataFrame({"n": [0.33333, 0.123456, 1.0201, 1.1769]})
+        >>> df.with_columns(
+        ...     t0=pl.col("n").truncate(0),
+        ...     t1=pl.col("n").truncate(1),
+        ...     t2=pl.col("n").truncate(2),
+        ... )
+        shape: (4, 4)
+        ┌──────────┬─────┬─────┬──────┐
+        │ n        ┆ t0  ┆ t1  ┆ t2   │
+        │ ---      ┆ --- ┆ --- ┆ ---  │
+        │ f64      ┆ f64 ┆ f64 ┆ f64  │
+        ╞══════════╪═════╪═════╪══════╡
+        │ 0.33333  ┆ 0.0 ┆ 0.3 ┆ 0.33 │
+        │ 0.123456 ┆ 0.0 ┆ 0.1 ┆ 0.12 │
+        │ 1.0201   ┆ 1.0 ┆ 1.0 ┆ 1.02 │
+        │ 1.1769   ┆ 1.0 ┆ 1.1 ┆ 1.17 │
+        └──────────┴─────┴─────┴──────┘
+        """
+        return wrap_expr(self._pyexpr.truncate(decimals))
 
     def dot(self, other: Expr | str_) -> Expr:
         """

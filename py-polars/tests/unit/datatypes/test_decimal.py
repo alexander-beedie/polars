@@ -594,6 +594,22 @@ def test_decimal_round() -> None:
         assert_series_equal(got_s, expected_s)
 
 
+def test_decimal_truncate() -> None:
+    from math import trunc
+
+    dtype = pl.Decimal(3, 2)
+    values = [D(f"{float(v) / 100.0:.02f}") for v in range(-150, 250, 1)]
+    i_s = pl.Series("a", values, dtype)
+
+    # truncate(0) should match math.trunc for all values
+    trunc_s = pl.Series("a", [D(str(trunc(v))) for v in values], dtype)
+    assert_series_equal(i_s.truncate(0), trunc_s)
+
+    # truncate(d) for d >= scale should be a no-op
+    for decimals in range(2, 10):
+        assert_series_equal(i_s.truncate(decimals), i_s)
+
+
 def test_decimal_arithmetic_schema() -> None:
     q = pl.LazyFrame({"x": [1.0]}, schema={"x": pl.Decimal(15, 2)})
 
