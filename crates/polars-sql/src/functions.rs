@@ -908,7 +908,11 @@ impl PolarsSQLFunctions {
 
 impl PolarsSQLFunctions {
     fn try_from_sql(function: &'_ SQLFunction, ctx: &'_ SQLContext) -> PolarsResult<Self> {
-        let function_name = function.name.0[0].as_ident().unwrap().value.to_lowercase();
+        let function_name = function.name.0[0]
+            .as_ident()
+            .unwrap()
+            .value
+            .to_ascii_lowercase();
         Ok(match function_name.as_str() {
             // ----
             // Bitwise functions

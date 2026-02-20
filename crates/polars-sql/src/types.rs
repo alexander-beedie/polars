@@ -198,7 +198,7 @@ pub(crate) fn map_sql_dtype_to_polars(dtype: &SQLDataType) -> PolarsResult<DataT
         // ---------------------------------
         SQLDataType::Custom(ObjectName(idents), _) => match idents.as_slice() {
             [ObjectNamePart::Identifier(Ident { value, .. })] => {
-                match value.to_lowercase().as_str() {
+                match value.to_ascii_lowercase().as_str() {
                     // these integer types are not supported by the PostgreSQL core distribution,
                     // but they ARE available via `pguint` (https://github.com/petere/pguint), an
                     // extension maintained by one of the PostgreSQL core developers, and/or DuckDB.

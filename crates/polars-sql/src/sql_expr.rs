@@ -1402,7 +1402,7 @@ fn resolve_column<'a>(
     dtype: &'a DataType,
 ) -> PolarsResult<(Expr, Option<&'a DataType>)> {
     let resolved = ctx.resolve_name(&ident_root.value, name);
-    let resolved = resolved.as_str();
+    let resolved: &str = &resolved;
     Ok((
         if name != resolved {
             col(resolved).alias(name)

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::ops::Deref;
 use std::sync::RwLock;
 
@@ -27,6 +28,7 @@ use crate::sql_expr::{
 };
 use crate::sql_visitors::{
     QualifyExpression, TableIdentifierCollector, check_for_ambiguous_column_refs,
+    check_unqualified_columns, collect_right_table_column_names, expr_has_table_qualifier,
     expr_has_window_functions, expr_refers_to_table,
 };
 use crate::table_functions::PolarsTableFunctions;
@@ -37,6 +39,42 @@ pub struct TableInfo {
     pub(crate) frame: LazyFrame,
     pub(crate) name: PlSmallStr,
     pub(crate) schema: Arc<Schema>,
+}
+
+/// Parsed join conditions: equi-conditions split into `left_on`/`right_on` pairs,
+/// and non-equi conditions collected as `predicates` (for `join_where`).
+struct JoinConditions {
+    left_on: Vec<Expr>,
+    right_on: Vec<Expr>,
+    predicates: Vec<Expr>,
+}
+
+impl JoinConditions {
+    fn equi(left_on: Vec<Expr>, right_on: Vec<Expr>) -> Self {
+        Self {
+            left_on,
+            right_on,
+            predicates: vec![],
+        }
+    }
+
+    fn non_equi(predicate: Expr) -> Self {
+        Self {
+            left_on: vec![],
+            right_on: vec![],
+            predicates: vec![predicate],
+        }
+    }
+
+    fn is_equi_only(&self) -> bool {
+        self.predicates.is_empty()
+    }
+
+    fn extend(&mut self, other: Self) {
+        self.left_on.extend(other.left_on);
+        self.right_on.extend(other.right_on);
+        self.predicates.extend(other.predicates);
+    }
 }
 
 struct SelectModifiers {
@@ -151,6 +189,7 @@ pub struct SQLContext {
     cte_map: PlHashMap<String, LazyFrame>,
     table_aliases: PlHashMap<String, String>,
     joined_aliases: PlHashMap<String, PlHashMap<String, String>>,
+    joined_table_columns: PlHashMap<String, PlHashSet<String>>,
     pub(crate) named_windows: PlHashMap<String, WindowSpec>,
 }
 
@@ -162,6 +201,7 @@ impl Default for SQLContext {
             cte_map: Default::default(),
             table_aliases: Default::default(),
             joined_aliases: Default::default(),
+            joined_table_columns: Default::default(),
             named_windows: Default::default(),
             lp_arena: Default::default(),
             expr_arena: Default::default(),
@@ -256,6 +296,7 @@ impl SQLContext {
         self.cte_map.clear();
         self.table_aliases.clear();
         self.joined_aliases.clear();
+        self.joined_table_columns.clear();
         self.named_windows.clear();
 
         Ok(res)
@@ -324,6 +365,45 @@ impl SQLContext {
 
     pub(crate) fn get_frame_schema(&mut self, frame: &mut LazyFrame) -> PolarsResult<SchemaRef> {
         frame.schema_with_arenas(&mut self.lp_arena, &mut self.expr_arena)
+    }
+
+    /// Record which right-table columns were suffixed in the joined schema so that
+    /// qualified references (`tbl.col`) can be resolved later.
+    /// Track column name mappings for a newly joined table. Only *conflicting* columns
+    /// (those that exist in both the left and right schemas, and were therefore suffixed
+    /// in the merged schema) are stored. Columns unique to the right table are not tracked
+    /// because they keep their original names and need no remapping.
+    ///
+    /// The `joined_aliases` map is keyed by table name. Its presence indicates the table
+    /// participated in a join; the inner map provides original → suffixed name mappings
+    /// only for conflicting columns (used by `resolve_name` and ambiguity checks).
+    fn track_joined_aliases(
+        &mut self,
+        lf: &mut LazyFrame,
+        r_name: &str,
+        left_schema: &Schema,
+        right_schema: &Schema,
+    ) -> PolarsResult<()> {
+        let joined_schema = self.get_frame_schema(lf)?;
+        let aliases: PlHashMap<_, _> = right_schema
+            .iter_names()
+            .filter(|name| left_schema.contains(name))
+            .filter_map(|name| {
+                let aliased_name = format_pl_smallstr!("{name}:{r_name}");
+                joined_schema
+                    .contains(aliased_name.as_str())
+                    .then(|| (name.to_string(), aliased_name.into_string()))
+            })
+            .collect();
+        if !aliases.is_empty() {
+            self.joined_aliases.insert(r_name.to_string(), aliases);
+        }
+        // Record the right table's original column names for ambiguity hints
+        self.joined_table_columns.insert(
+            r_name.to_string(),
+            right_schema.iter_names().map(|n| n.to_string()).collect(),
+        );
+        Ok(())
     }
 
     pub(super) fn get_table_from_current_scope(&self, name: &str) -> Option<LazyFrame> {
@@ -461,13 +541,19 @@ impl SQLContext {
         }
     }
 
-    pub(super) fn resolve_name(&self, tbl_name: &str, column_name: &str) -> String {
+    /// Resolve a qualified column reference (e.g. `tbl.col`) to the actual column name in
+    /// the merged join schema. If the column was suffixed during a join (because it exists in
+    /// both tables), returns the suffixed name (e.g. `col:tbl`). Otherwise, returns the
+    /// original column name — this is correct both when the column is unique to one table
+    /// (no suffix needed) and when `tbl_name` is not a joined table. No existence validation
+    /// is performed here; invalid column names will be caught later during expression resolution.
+    pub(super) fn resolve_name<'a>(&'a self, tbl_name: &str, column_name: &'a str) -> Cow<'a, str> {
         if let Some(aliases) = self.joined_aliases.get(tbl_name) {
             if let Some(name) = aliases.get(column_name) {
-                return name.to_string();
+                return Cow::Owned(name.to_string());
             }
         }
-        column_name.to_string()
+        Cow::Borrowed(column_name)
     }
 
     fn process_query(&mut self, expr: &SetExpr, query: &Query) -> PolarsResult<LazyFrame> {
@@ -636,6 +722,13 @@ impl SQLContext {
             .ok_or_else(|| polars_err!(SQLSyntax: "UNNEST table must have an alias"))?;
         polars_ensure!(!with_offset, SQLInterface: "UNNEST tables do not (yet) support WITH ORDINALITY|OFFSET");
 
+        // Reject mixed literal arrays and column references up front
+        if array_exprs.iter().any(|e| matches!(e, SQLExpr::Array(_))) {
+            polars_bail!(
+                SQLInterface: "CROSS JOIN UNNEST does not support mixing literal arrays and column references"
+            )
+        }
+
         let (mut explode_cols, mut rename_from, mut rename_to) = (
             Vec::with_capacity(array_exprs.len()),
             Vec::with_capacity(array_exprs.len()),
@@ -649,11 +742,8 @@ impl SQLContext {
                 SQLExpr::CompoundIdentifier(parts) => {
                     PlSmallStr::from_str(&parts.last().unwrap().value)
                 },
-                SQLExpr::Array(_) => polars_bail!(
-                    SQLInterface: "CROSS JOIN UNNEST with both literal arrays and column references is not supported"
-                ),
                 other => polars_bail!(
-                    SQLSyntax: "UNNEST expects column references or array literals, found {:?}", other
+                    SQLSyntax: "UNNEST expects column references, found {:?}", other
                 ),
             };
             // alias: column name from "AS t(col)", or table alias
@@ -875,6 +965,12 @@ impl SQLContext {
     fn execute_from_statement(&mut self, tbl_expr: &TableWithJoins) -> PolarsResult<LazyFrame> {
         let (l_name, mut lf) = self.get_table(&tbl_expr.relation)?;
         if !tbl_expr.joins.is_empty() {
+            // Record the base table's original column names for ambiguity hints
+            let base_schema = self.get_frame_schema(&mut lf)?;
+            self.joined_table_columns.insert(
+                l_name.clone(),
+                base_schema.iter_names().map(|n| n.to_string()).collect(),
+            );
             for join in &tbl_expr.joins {
                 // Handle "CROSS JOIN UNNEST(col)" as a lateral join op
                 if let (
@@ -887,7 +983,9 @@ impl SQLContext {
                     },
                 ) = (&join.join_operator, &join.relation)
                 {
-                    if array_exprs.iter().any(|e| !matches!(e, SQLExpr::Array(_))) {
+                    // Literal arrays are handled via get_table; column references
+                    // are handled via process_unnest_lateral (lateral join/explode).
+                    if !array_exprs.iter().all(|e| matches!(e, SQLExpr::Array(_))) {
                         lf = self.process_unnest_lateral(lf, alias, array_exprs, *with_offset)?;
                         continue;
                     }
@@ -904,96 +1002,52 @@ impl SQLContext {
                 let left_schema = self.get_frame_schema(&mut lf)?;
                 let right_schema = self.get_frame_schema(&mut rf)?;
 
-                lf = match &join.join_operator {
-                    op @ (JoinOperator::Join(constraint)  // note: bare "join" is inner
-                    | JoinOperator::FullOuter(constraint)
-                    | JoinOperator::Left(constraint)
-                    | JoinOperator::LeftOuter(constraint)
-                    | JoinOperator::Right(constraint)
-                    | JoinOperator::RightOuter(constraint)
-                    | JoinOperator::Inner(constraint)
-                    | JoinOperator::Anti(constraint)
-                    | JoinOperator::Semi(constraint)
-                    | JoinOperator::LeftAnti(constraint)
-                    | JoinOperator::LeftSemi(constraint)
-                    | JoinOperator::RightAnti(constraint)
-                    | JoinOperator::RightSemi(constraint)) => {
-                        let (lf, rf) = match op {
-                            JoinOperator::RightAnti(_) | JoinOperator::RightSemi(_) => (rf, lf),
-                            _ => (lf, rf),
+                lf = match decompose_join_operator(&join.join_operator)? {
+                    JoinOperatorInfo::Constrained {
+                        constraint,
+                        join_type,
+                        swap_sides,
+                    } => {
+                        let (lf, rf, l_schema, r_schema, ln, rn) = if swap_sides {
+                            (
+                                rf,
+                                lf,
+                                right_schema.clone(),
+                                left_schema.clone(),
+                                &r_name,
+                                &l_name,
+                            )
+                        } else {
+                            (
+                                lf,
+                                rf,
+                                left_schema.clone(),
+                                right_schema.clone(),
+                                &l_name,
+                                &r_name,
+                            )
                         };
                         self.process_join(
                             &TableInfo {
                                 frame: lf,
-                                name: (&l_name).into(),
-                                schema: left_schema.clone(),
+                                name: ln.into(),
+                                schema: l_schema,
                             },
                             &TableInfo {
                                 frame: rf,
-                                name: (&r_name).into(),
-                                schema: right_schema.clone(),
+                                name: rn.into(),
+                                schema: r_schema,
                             },
                             constraint,
-                            match op {
-                                JoinOperator::Join(_) | JoinOperator::Inner(_) => JoinType::Inner,
-                                JoinOperator::Left(_) | JoinOperator::LeftOuter(_) => {
-                                    JoinType::Left
-                                },
-                                JoinOperator::Right(_) | JoinOperator::RightOuter(_) => {
-                                    JoinType::Right
-                                },
-                                JoinOperator::FullOuter(_) => JoinType::Full,
-                                #[cfg(feature = "semi_anti_join")]
-                                JoinOperator::Anti(_)
-                                | JoinOperator::LeftAnti(_)
-                                | JoinOperator::RightAnti(_) => JoinType::Anti,
-                                #[cfg(feature = "semi_anti_join")]
-                                JoinOperator::Semi(_)
-                                | JoinOperator::LeftSemi(_)
-                                | JoinOperator::RightSemi(_) => JoinType::Semi,
-                                join_type => polars_bail!(
-                                    SQLInterface:
-                                    "join type '{:?}' not currently supported",
-                                    join_type
-                                ),
-                            },
+                            join_type,
                         )?
                     },
-                    JoinOperator::CrossJoin(JoinConstraint::None) => {
+                    JoinOperatorInfo::Cross => {
                         lf.cross_join(rf, Some(format_pl_smallstr!(":{}", r_name)))
-                    },
-                    JoinOperator::CrossJoin(constraint) => {
-                        polars_bail!(
-                            SQLInterface:
-                            "CROSS JOIN does not support {:?} constraint; consider INNER JOIN instead",
-                            constraint
-                        )
-                    },
-                    join_type => {
-                        polars_bail!(SQLInterface: "join type '{:?}' not currently supported", join_type)
                     },
                 };
 
-                // track join-aliased columns so we can resolve/check them later
-                let joined_schema = self.get_frame_schema(&mut lf)?;
-
-                self.joined_aliases.insert(
-                    r_name.clone(),
-                    right_schema
-                        .iter_names()
-                        .filter_map(|name| {
-                            // col exists in both tables and is aliased in the joined result
-                            let aliased_name = format!("{name}:{r_name}");
-                            if left_schema.contains(name)
-                                && joined_schema.contains(aliased_name.as_str())
-                            {
-                                Some((name.to_string(), aliased_name))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<PlHashMap<String, String>>(),
-                );
+                self.track_joined_aliases(&mut lf, &r_name, &left_schema, &right_schema)?;
             }
         };
         Ok(lf)
@@ -1096,55 +1150,64 @@ impl SQLContext {
         self.register_named_windows(&select_stmt.named_window)?;
 
         // Get `FROM` table/data
-        let (mut lf, base_table_name) = if select_stmt.from.is_empty() {
-            (DataFrame::empty().lazy(), None)
+        let (mut lf, _base_table_name, effective_selection) = if select_stmt.from.is_empty() {
+            (
+                DataFrame::empty().lazy(),
+                None,
+                select_stmt.selection.clone(),
+            )
         } else {
-            // Note: implicit joins need more work to support properly,
-            // explicit joins are preferred for now (ref: #16662)
-            let from = select_stmt.clone().from;
-            if from.len() > 1 {
-                polars_bail!(SQLInterface: "multiple tables in FROM clause are not currently supported (found {}); use explicit JOIN syntax instead", from.len())
-            }
-            let tbl_expr = from.first().unwrap();
-            let lf = self.execute_from_statement(tbl_expr)?;
-            let base_name = get_table_name(&tbl_expr.relation);
-            (lf, base_name)
+            let from = &select_stmt.from;
+            let first = from.first().unwrap();
+            let mut lf = self.execute_from_statement(first)?;
+            let base_name = get_table_name(&first.relation);
+            let selection = if from.len() > 1 {
+                self.process_implicit_joins(&mut lf, from, &select_stmt.selection)?
+            } else {
+                select_stmt.selection.clone()
+            };
+            (lf, base_name, selection)
         };
 
-        // Check for ambiguous column references in SELECT and WHERE (if there were joins)
-        if let Some(ref base_name) = base_table_name {
-            if !self.joined_aliases.is_empty() {
-                // Extract USING columns from joins (these are coalesced and not ambiguous)
-                let using_cols: PlHashSet<String> = select_stmt
-                    .from
-                    .first()
-                    .into_iter()
-                    .flat_map(|t| t.joins.iter())
-                    .filter_map(|join| get_using_cols(&join.join_operator))
-                    .flatten()
-                    .collect();
+        // Check for ambiguous column references in SELECT and WHERE (if there were joins).
+        if !self.joined_aliases.is_empty() {
+            // Extract USING columns from joins (these are coalesced and not ambiguous)
+            let using_cols: PlHashSet<String> = select_stmt
+                .from
+                .first()
+                .into_iter()
+                .flat_map(|t| t.joins.iter())
+                .filter_map(|join| get_using_cols(&join.join_operator))
+                .flatten()
+                .collect();
 
-                // Check SELECT and WHERE expressions for ambiguous column references
-                let check_expr = |e| {
-                    check_for_ambiguous_column_refs(e, &self.joined_aliases, base_name, &using_cols)
-                };
-                for item in &select_stmt.projection {
-                    match item {
-                        SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => {
-                            check_expr(e)?
-                        },
-                        _ => {},
-                    }
+            // Check SELECT and WHERE expressions for ambiguous column references.
+            // Wildcard/QualifiedWildcard items are intentionally skipped here;
+            // their disambiguation is handled separately during wildcard expansion.
+            let check_expr = |e| {
+                check_for_ambiguous_column_refs(
+                    e,
+                    &self.joined_aliases,
+                    &self.joined_table_columns,
+                    &using_cols,
+                )
+            };
+            for item in &select_stmt.projection {
+                match item {
+                    SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => {
+                        check_expr(e)?
+                    },
+                    _ => {},
                 }
-                if let Some(ref where_expr) = select_stmt.selection {
-                    check_expr(where_expr)?;
-                }
+            }
+            if let Some(ref where_expr) = effective_selection {
+                check_expr(where_expr)?;
             }
         }
 
         // Apply `WHERE` constraint
         let mut schema = self.get_frame_schema(&mut lf)?;
-        lf = self.process_where(lf, &select_stmt.selection, false, Some(schema.clone()))?;
+        lf = self.process_where(lf, &effective_selection, false, Some(schema.clone()))?;
 
         // Determine projections
         let mut select_modifiers = SelectModifiers {
@@ -1539,7 +1602,10 @@ impl SQLContext {
         };
         let flattened_exprs = exprs
             .into_iter()
-            .flat_map(|expr| expand_exprs(expr, schema))
+            .map(|expr| expand_exprs(expr, schema))
+            .collect::<PolarsResult<Vec<_>>>()?
+            .into_iter()
+            .flatten()
             .collect();
 
         Ok(flattened_exprs)
@@ -1586,7 +1652,7 @@ impl SQLContext {
             if filter_expression.clone().meta().has_multiple_outputs() {
                 filter_expression = all_horizontal([filter_expression])?;
             }
-            lf = self.process_subqueries(lf, vec![&mut filter_expression]);
+            lf = self.process_subqueries(lf, vec![&mut filter_expression])?;
             lf = if invert_filter {
                 lf.remove(filter_expression)
             } else {
@@ -1603,25 +1669,166 @@ impl SQLContext {
         constraint: &JoinConstraint,
         join_type: JoinType,
     ) -> PolarsResult<LazyFrame> {
-        let (left_on, right_on) = process_join_constraint(constraint, tbl_left, tbl_right, self)?;
+        let suffix = format_pl_smallstr!(":{}", tbl_right.name);
+        let jc = process_join_constraint(constraint, tbl_left, tbl_right, &suffix, self)?;
         let coalesce_type = match constraint {
             // "NATURAL" joins should coalesce; otherwise we disambiguate
             JoinConstraint::Natural => JoinCoalesce::CoalesceColumns,
             _ => JoinCoalesce::KeepColumns,
         };
-        let joined = tbl_left
-            .frame
-            .clone()
-            .join_builder()
-            .with(tbl_right.frame.clone())
-            .left_on(left_on)
-            .right_on(right_on)
-            .how(join_type)
-            .suffix(format!(":{}", tbl_right.name))
-            .coalesce(coalesce_type)
-            .finish();
+        polars_ensure!(
+            jc.left_on.len() == jc.right_on.len(),
+            SQLInterface: "internal error: equi-join left_on ({}) and right_on ({}) have different lengths",
+            jc.left_on.len(), jc.right_on.len()
+        );
+
+        let joined = if jc.is_equi_only() {
+            // Pure equi-join: use the optimized left_on/right_on path
+            tbl_left
+                .frame
+                .clone()
+                .join_builder()
+                .with(tbl_right.frame.clone())
+                .left_on(jc.left_on)
+                .right_on(jc.right_on)
+                .how(join_type)
+                .suffix(suffix)
+                .coalesce(coalesce_type)
+                .finish()
+        } else {
+            // Non-equi conditions present: use join_where (Cross + Filter).
+            // This only produces correct results for INNER joins; outer join
+            // semantics (LEFT/RIGHT/FULL) are not preserved.
+            polars_ensure!(
+                matches!(join_type, JoinType::Inner),
+                SQLInterface: "non-equi join conditions are not yet supported with {} joins; \
+                    use INNER JOIN or restructure the query", join_type
+            );
+            // Any equi-conditions are reformulated as equality predicates with the right-side
+            // columns suffixed to match their merged-schema names.
+            let mut all_predicates = jc.predicates;
+            for (l, r) in jc.left_on.into_iter().zip(jc.right_on) {
+                let r_suffixed =
+                    suffix_conflicting_columns(r, &tbl_left.schema, &tbl_right.schema, &suffix);
+                all_predicates.push(l.eq(r_suffixed));
+            }
+            tbl_left
+                .frame
+                .clone()
+                .join_builder()
+                .with(tbl_right.frame.clone())
+                .how(join_type)
+                .suffix(suffix)
+                .coalesce(coalesce_type)
+                .join_where(all_predicates)
+        };
 
         Ok(joined)
+    }
+
+    /// Process implicit (comma-separated) joins from `FROM t1, t2, ...` syntax.
+    ///
+    /// Extracts join predicates from the WHERE clause, joining each additional table with
+    /// either an INNER JOIN (when cross-table predicates are found) or a CROSS JOIN (when
+    /// no predicates bridge the tables). Returns the residual WHERE conditions that were
+    /// not consumed as join predicates.
+    ///
+    /// Predicate extraction supports both fully-qualified references (e.g. `t1.col`) and
+    /// unqualified column names resolved via schema membership. Unqualified columns that
+    /// exist in only one table are matched to that table; columns that exist in multiple
+    /// tables are ambiguous and will not be recognised as join predicates.
+    fn process_implicit_joins(
+        &mut self,
+        lf: &mut LazyFrame,
+        from: &[TableWithJoins],
+        where_clause: &Option<SQLExpr>,
+    ) -> PolarsResult<Option<SQLExpr>> {
+        let first = from.first().unwrap();
+        let base_name = require_table_name(&first.relation)?;
+
+        let mut remaining_where = where_clause.clone();
+        let mut joined_table_names: PlHashSet<String> = PlHashSet::with_capacity(from.len());
+        let base_name_small = PlSmallStr::from_str(&base_name);
+
+        // Record the base table's column names for ambiguity hints (if not already
+        // recorded by execute_from_statement due to explicit joins on this table).
+        if !self.joined_table_columns.contains_key(&base_name) {
+            let base_schema = self.get_frame_schema(lf)?;
+            self.joined_table_columns.insert(
+                base_name.clone(),
+                base_schema.iter_names().map(|n| n.to_string()).collect(),
+            );
+        }
+        joined_table_names.insert(base_name);
+
+        // Track table names from explicit joins in the first FROM entry
+        for join in &first.joins {
+            joined_table_names.insert(require_table_name(&join.relation)?);
+        }
+
+        for tbl_expr in from.iter().skip(1) {
+            let mut rf = self.execute_from_statement(tbl_expr)?;
+            let r_name = require_table_name(&tbl_expr.relation)?;
+
+            let left_schema = self.get_frame_schema(lf)?;
+            let right_schema = self.get_frame_schema(&mut rf)?;
+
+            let (join_expr, residual, has_unextractable_cross_table) = extract_join_predicates(
+                remaining_where,
+                &joined_table_names,
+                &r_name,
+                &left_schema,
+                &right_schema,
+            );
+
+            *lf = if let Some(on_expr) = join_expr {
+                // Note: when has_unextractable_cross_table is true, the unextractable
+                // conditions remain in `residual` and will be applied as a post-join
+                // filter. This is semantically correct for INNER joins (which implicit
+                // joins always use). If implicit joins ever support non-INNER types,
+                // this assumption must be revisited.
+                self.process_join(
+                    &TableInfo {
+                        frame: lf.clone(),
+                        name: base_name_small.clone(),
+                        schema: left_schema.clone(),
+                    },
+                    &TableInfo {
+                        frame: rf,
+                        name: PlSmallStr::from_str(&r_name),
+                        schema: right_schema.clone(),
+                    },
+                    &JoinConstraint::On(on_expr),
+                    JoinType::Inner,
+                )?
+            } else {
+                // Error rather than silently falling back to an expensive cartesian
+                // product when cross-table predicates exist but couldn't be extracted
+                // as join conditions (e.g. OR-connected or non-comparison operators).
+                if has_unextractable_cross_table {
+                    polars_bail!(
+                        SQLInterface:
+                        "implicit join between previously joined tables and '{}' found \
+                        cross-table predicates in the WHERE clause that could not be \
+                        extracted as join conditions (e.g. they may be OR-connected or \
+                        use unsupported syntax); use explicit JOIN ... ON syntax, or \
+                        restructure the query using UNION",
+                        r_name
+                    )
+                }
+                lf.clone()
+                    .cross_join(rf, Some(format_pl_smallstr!(":{}", r_name)))
+            };
+            remaining_where = residual;
+
+            self.track_joined_aliases(lf, &r_name, &left_schema, &right_schema)?;
+
+            joined_table_names.insert(r_name);
+            for join in &tbl_expr.joins {
+                joined_table_names.insert(require_table_name(&join.relation)?);
+            }
+        }
+        Ok(remaining_where)
     }
 
     fn process_qualify(
@@ -1646,23 +1853,25 @@ impl SQLContext {
             if filter_expression.clone().meta().has_multiple_outputs() {
                 filter_expression = all_horizontal([filter_expression])?;
             }
-            lf = self.process_subqueries(lf, vec![&mut filter_expression]);
+            lf = self.process_subqueries(lf, vec![&mut filter_expression])?;
             lf = lf.filter(filter_expression);
         }
         Ok(lf)
     }
 
-    fn process_subqueries(&self, lf: LazyFrame, exprs: Vec<&mut Expr>) -> LazyFrame {
+    fn process_subqueries(&self, lf: LazyFrame, exprs: Vec<&mut Expr>) -> PolarsResult<LazyFrame> {
         let mut subplans = vec![];
+        let mut subquery_err: Option<PolarsError> = None;
 
         for e in exprs {
             *e = e.clone().map_expr(|e| {
                 if let Expr::SubPlan(lp, names) = e {
-                    assert_eq!(
-                        names.len(),
-                        1,
-                        "multiple columns in subqueries not yet supported"
-                    );
+                    if names.len() != 1 {
+                        subquery_err = Some(polars_err!(
+                            SQLInterface: "subqueries returning multiple columns are not yet supported"
+                        ));
+                        return Expr::Literal(LiteralValue::untyped_null());
+                    }
 
                     let select_expr = names[0].1.clone();
                     let cb =
@@ -1677,10 +1886,13 @@ impl SQLContext {
                     e
                 }
             });
+            if let Some(err) = subquery_err.take() {
+                return Err(err);
+            }
         }
 
         if subplans.is_empty() {
-            lf
+            Ok(lf)
         } else {
             subplans.insert(0, lf);
             concat_lf_horizontal(
@@ -1690,7 +1902,6 @@ impl SQLContext {
                     ..Default::default()
                 },
             )
-            .unwrap()
         }
     }
 
@@ -2024,7 +2235,7 @@ impl SQLContext {
             .iter()
             .map(|gk| {
                 (
-                    strip_outer_alias(gk),
+                    strip_outer_alias(gk.clone()),
                     gk.to_field(&schema_before).ok().map(|f| f.name),
                 )
             })
@@ -2033,7 +2244,7 @@ impl SQLContext {
         let projection_matches_group_key: Vec<bool> = projections
             .iter()
             .map(|p| {
-                let p_stripped = strip_outer_alias(p);
+                let p_stripped = strip_outer_alias(p.clone());
                 let p_name = p.to_field(&schema_before).ok().map(|f| f.name);
                 group_key_data
                     .iter()
@@ -2358,7 +2569,8 @@ impl SQLContext {
                 .replace('_', ".");
 
             modifiers.ilike = Some(
-                polars_utils::regex_cache::compile_regex(format!("^(?is){rx}$").as_str()).unwrap(),
+                polars_utils::regex_cache::compile_regex(format!("^(?is){rx}$").as_str())
+                    .map_err(|e| polars_err!(SQLSyntax: "invalid ILIKE pattern: {}", e))?,
             );
         }
 
@@ -2423,23 +2635,23 @@ impl SQLContext {
     }
 }
 
-fn expand_exprs(expr: Expr, schema: &SchemaRef) -> Vec<Expr> {
+fn expand_exprs(expr: Expr, schema: &SchemaRef) -> PolarsResult<Vec<Expr>> {
     match expr {
         Expr::Column(nm) if is_regex_colname(nm.as_str()) => {
-            let re = polars_utils::regex_cache::compile_regex(&nm).unwrap();
-            schema
+            let re = polars_utils::regex_cache::compile_regex(&nm)
+                .map_err(|e| polars_err!(SQLSyntax: "invalid regex column pattern: {}", e))?;
+            Ok(schema
                 .iter_names()
                 .filter(|name| re.is_match(name))
                 .map(|name| col(name.clone()))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>())
         },
-        Expr::Selector(s) => s
-            .into_columns(schema, &Default::default())
-            .unwrap()
+        Expr::Selector(s) => Ok(s
+            .into_columns(schema, &Default::default())?
             .into_iter()
             .map(col)
-            .collect::<Vec<_>>(),
-        _ => vec![expr],
+            .collect::<Vec<_>>()),
+        _ => Ok(vec![expr]),
     }
 }
 
@@ -2448,22 +2660,14 @@ fn is_regex_colname(nm: &str) -> bool {
 }
 
 /// Extract column names from a USING clause in a JoinOperator (if present).
+///
+/// Note: errors from `decompose_join_operator` are intentionally swallowed here;
+/// the actual join processing will surface them later. This is a best-effort
+/// extraction used only for the ambiguous column reference check.
 fn get_using_cols(op: &JoinOperator) -> Option<impl Iterator<Item = String> + '_> {
-    use JoinOperator::*;
-    match op {
-        Join(JoinConstraint::Using(cols))
-        | Inner(JoinConstraint::Using(cols))
-        | Left(JoinConstraint::Using(cols))
-        | LeftOuter(JoinConstraint::Using(cols))
-        | Right(JoinConstraint::Using(cols))
-        | RightOuter(JoinConstraint::Using(cols))
-        | FullOuter(JoinConstraint::Using(cols))
-        | Semi(JoinConstraint::Using(cols))
-        | Anti(JoinConstraint::Using(cols))
-        | LeftSemi(JoinConstraint::Using(cols))
-        | LeftAnti(JoinConstraint::Using(cols))
-        | RightSemi(JoinConstraint::Using(cols))
-        | RightAnti(JoinConstraint::Using(cols)) => Some(cols.iter().filter_map(|c| {
+    let constraint = decompose_join_operator(op).ok()?.into_constraint()?;
+    match constraint {
+        JoinConstraint::Using(cols) => Some(cols.iter().filter_map(|c| {
             c.0.first()
                 .and_then(|p| p.as_ident())
                 .map(|i| i.value.clone())
@@ -2485,8 +2689,115 @@ fn get_table_name(factor: &TableFactor) -> Option<String> {
         },
         TableFactor::Derived { alias, .. }
         | TableFactor::NestedJoin { alias, .. }
-        | TableFactor::TableFunction { alias, .. } => alias.as_ref().map(|a| a.name.value.clone()),
+        | TableFactor::TableFunction { alias, .. }
+        | TableFactor::UNNEST { alias, .. } => alias.as_ref().map(|a| a.name.value.clone()),
         _ => None,
+    }
+}
+
+/// Like `get_table_name`, but returns an error (instead of `None`) when the table
+/// name cannot be determined. Used in contexts where a name is required (e.g.
+/// implicit joins need named tables for predicate extraction).
+fn require_table_name(factor: &TableFactor) -> PolarsResult<String> {
+    get_table_name(factor)
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| {
+            let kind = match factor {
+                TableFactor::Table { .. } => "table",
+                TableFactor::Derived { .. } => "derived table (subquery)",
+                TableFactor::NestedJoin { .. } => "nested join",
+                TableFactor::TableFunction { .. } => "table function",
+                TableFactor::UNNEST { .. } => "UNNEST expression",
+                _ => "relation",
+            };
+            polars_err!(
+                SQLInterface: "implicit joins require named tables; \
+                please provide an alias for the {}", kind
+            )
+        })
+}
+
+/// Decomposed result of a `JoinOperator` variant.
+enum JoinOperatorInfo<'a> {
+    /// A standard constrained join (INNER, LEFT, etc.) with constraint, type, and swap flag.
+    Constrained {
+        constraint: &'a JoinConstraint,
+        join_type: JoinType,
+        swap_sides: bool,
+    },
+    /// A CROSS JOIN (no constraint).
+    Cross,
+}
+
+impl<'a> JoinOperatorInfo<'a> {
+    fn into_constraint(self) -> Option<&'a JoinConstraint> {
+        match self {
+            Self::Constrained { constraint, .. } => Some(constraint),
+            Self::Cross => None,
+        }
+    }
+}
+
+/// Decompose a `JoinOperator` into its constraint, Polars `JoinType`, and a flag indicating
+/// whether left/right sides should be swapped (for RIGHT ANTI/SEMI → ANTI/SEMI conversion).
+fn decompose_join_operator(op: &JoinOperator) -> PolarsResult<JoinOperatorInfo<'_>> {
+    use JoinOperator::*;
+    match op {
+        Join(c) | Inner(c) => Ok(JoinOperatorInfo::Constrained {
+            constraint: c,
+            join_type: JoinType::Inner,
+            swap_sides: false,
+        }),
+        Left(c) | LeftOuter(c) => Ok(JoinOperatorInfo::Constrained {
+            constraint: c,
+            join_type: JoinType::Left,
+            swap_sides: false,
+        }),
+        Right(c) | RightOuter(c) => Ok(JoinOperatorInfo::Constrained {
+            constraint: c,
+            join_type: JoinType::Right,
+            swap_sides: false,
+        }),
+        FullOuter(c) => Ok(JoinOperatorInfo::Constrained {
+            constraint: c,
+            join_type: JoinType::Full,
+            swap_sides: false,
+        }),
+        #[cfg(feature = "semi_anti_join")]
+        Anti(c) | LeftAnti(c) => Ok(JoinOperatorInfo::Constrained {
+            constraint: c,
+            join_type: JoinType::Anti,
+            swap_sides: false,
+        }),
+        #[cfg(feature = "semi_anti_join")]
+        RightAnti(c) => Ok(JoinOperatorInfo::Constrained {
+            constraint: c,
+            join_type: JoinType::Anti,
+            swap_sides: true,
+        }),
+        #[cfg(feature = "semi_anti_join")]
+        Semi(c) | LeftSemi(c) => Ok(JoinOperatorInfo::Constrained {
+            constraint: c,
+            join_type: JoinType::Semi,
+            swap_sides: false,
+        }),
+        #[cfg(feature = "semi_anti_join")]
+        RightSemi(c) => Ok(JoinOperatorInfo::Constrained {
+            constraint: c,
+            join_type: JoinType::Semi,
+            swap_sides: true,
+        }),
+        CrossJoin(JoinConstraint::None) => Ok(JoinOperatorInfo::Cross),
+        CrossJoin(constraint) => {
+            polars_bail!(
+                SQLInterface:
+                "CROSS JOIN does not support {:?} constraint; consider INNER JOIN instead",
+                constraint
+            )
+        },
+        other => {
+            polars_bail!(SQLInterface: "join type '{:?}' not currently supported", other)
+        },
     }
 }
 
@@ -2499,12 +2810,11 @@ fn is_simple_col_ref(expr: &Expr, col_name: &PlSmallStr) -> bool {
     }
 }
 
-/// Strip the outer alias from an expression (if present) for expression equality comparison.
-fn strip_outer_alias(expr: &Expr) -> Expr {
-    if let Expr::Alias(inner, _) = expr {
-        inner.as_ref().clone()
-    } else {
-        expr.clone()
+/// Strip the outer alias from an expression (if present).
+fn strip_outer_alias(expr: Expr) -> Expr {
+    match expr {
+        Expr::Alias(inner, _) => Arc::unwrap_or_clone(inner),
+        e => e,
     }
 }
 
@@ -2526,8 +2836,12 @@ fn resolve_select_alias(name: &str, projections: &[Expr], schema: &Schema) -> Op
     })
 }
 
-/// Check if all columns referred to in a Polars expression exist in the given Schema.
-fn expr_cols_all_in_schema(expr: &Expr, schema: &Schema) -> bool {
+/// Check if the expression references columns and whether they exist in the given Schema.
+/// Returns `(has_columns, all_in_schema)`:
+/// - `has_columns`: true if at least one `Expr::Column` reference exists.
+/// - `all_in_schema`: true if every referenced column exists in the schema (vacuously true when
+///   `has_columns` is false).
+fn expr_col_schema_membership(expr: &Expr, schema: &Schema) -> (bool, bool) {
     let mut found_cols = false;
     let mut all_in_schema = true;
     for e in expr.into_iter() {
@@ -2539,10 +2853,95 @@ fn expr_cols_all_in_schema(expr: &Expr, schema: &Schema) -> bool {
             }
         }
     }
-    found_cols && all_in_schema
+    (found_cols, all_in_schema)
 }
 
-/// Determine which parsed join expressions actually belong in `left_om` and which in `right_on`.
+/// Map a SQL binary operator to its Polars equivalent (comparison operators only).
+fn sql_op_to_polars(op: &BinaryOperator) -> Option<Operator> {
+    match op {
+        BinaryOperator::Eq => Some(Operator::Eq),
+        BinaryOperator::Lt => Some(Operator::Lt),
+        BinaryOperator::LtEq => Some(Operator::LtEq),
+        BinaryOperator::Gt => Some(Operator::Gt),
+        BinaryOperator::GtEq => Some(Operator::GtEq),
+        BinaryOperator::NotEq => Some(Operator::NotEq),
+        _ => None,
+    }
+}
+
+/// Indicates which side of a join an expression belongs to (using a two-phase check:
+/// SQL-level qualifiers first, then schema-based column resolution as fallback).
+#[derive(Clone, Copy)]
+enum TableSide {
+    Left,
+    Right,
+    /// Column exists in both schemas (schema-based resolution); needs qualification.
+    AmbiguousSchema,
+    /// SQL-level qualifiers explicitly reference both tables; unsupported.
+    CrossQualified,
+    /// Expression contains no column references (e.g. a literal or constant).
+    Literal,
+    /// Expression has column references that don't match either schema.
+    Unknown,
+}
+
+/// Determine which table a single operand of a join condition belongs to.
+fn resolve_table_side(
+    sql_expr: &SQLExpr,
+    polars_expr: &Expr,
+    tbl_left: &TableInfo,
+    tbl_right: &TableInfo,
+) -> TableSide {
+    // Phase 1: SQL-level qualified references (e.g. `t1.col`)
+    let refs_left = expr_refers_to_table(sql_expr, &tbl_left.name);
+    let refs_right = expr_refers_to_table(sql_expr, &tbl_right.name);
+    match (refs_left, refs_right) {
+        (true, false) => return TableSide::Left,
+        (false, true) => return TableSide::Right,
+        (true, true) => return TableSide::CrossQualified,
+        _ => {},
+    }
+    // Phase 2: schema-based column resolution (unqualified columns / chained joins)
+    let (left_has_cols, left_all_in) = expr_col_schema_membership(polars_expr, &tbl_left.schema);
+    let (right_has_cols, right_all_in) = expr_col_schema_membership(polars_expr, &tbl_right.schema);
+    let in_left = left_has_cols && left_all_in;
+    let in_right = right_has_cols && right_all_in;
+    match (in_left, in_right) {
+        (true, false) => TableSide::Left,
+        (false, true) => TableSide::Right,
+        (true, true) => TableSide::AmbiguousSchema,
+        // No column references at all → literal/constant expression
+        _ if !left_has_cols && !right_has_cols => TableSide::Literal,
+        // Has columns but they don't match either schema
+        _ => TableSide::Unknown,
+    }
+}
+
+/// Resolve a `Both` + known-side combination: when one operand's columns exist in both schemas
+/// (the `Both` side), check that the SQL expression is table-qualified (indicating a multi-table
+/// chain reference). Then pair the operands for `(left_on, right_on)` based on the known side.
+fn resolve_both_side(
+    both_sql_expr: &SQLExpr,
+    both_on: Expr,
+    known_on: Expr,
+    known_is_left: bool,
+    label: &str,
+) -> PolarsResult<(Expr, Expr)> {
+    if !expr_has_table_qualifier(both_sql_expr) {
+        polars_bail!(
+            SQLInterface: "ambiguous column in join condition: the {} operand exists \
+            in both tables; use qualified names (e.g. 'table.column') to disambiguate",
+            label
+        )
+    }
+    if known_is_left {
+        Ok((known_on, both_on))
+    } else {
+        Ok((both_on, known_on))
+    }
+}
+
+/// Determine which parsed join expressions actually belong in `left_on` and which in `right_on`.
 ///
 /// This needs to be handled carefully because in SQL joins you can write "join on" constraints
 /// either way round, and in joins with more than two tables you can also join against an earlier
@@ -2556,119 +2955,276 @@ fn determine_left_right_join_on(
     tbl_left: &TableInfo,
     tbl_right: &TableInfo,
     join_schema: &Schema,
-) -> PolarsResult<(Vec<Expr>, Vec<Expr>)> {
-    // parse, removing any aliases that may have been added by `resolve_column`
+) -> PolarsResult<(Expr, Expr)> {
+    // Parse, removing any aliases that may have been added by `resolve_column`
     // (called inside `parse_sql_expr`) as we need the actual/underlying col
-    let left_on = match parse_sql_expr(expr_left, ctx, Some(join_schema))? {
-        Expr::Alias(inner, _) => Arc::unwrap_or_clone(inner),
-        e => e,
-    };
-    let right_on = match parse_sql_expr(expr_right, ctx, Some(join_schema))? {
-        Expr::Alias(inner, _) => Arc::unwrap_or_clone(inner),
-        e => e,
-    };
+    let left_on = strip_outer_alias(parse_sql_expr(expr_left, ctx, Some(join_schema))?);
+    let right_on = strip_outer_alias(parse_sql_expr(expr_right, ctx, Some(join_schema))?);
 
-    // ------------------------------------------------------------------
-    // simple/typical case: can fully resolve SQL-level table references
-    // ------------------------------------------------------------------
-    let left_refs = (
-        expr_refers_to_table(expr_left, &tbl_left.name),
-        expr_refers_to_table(expr_left, &tbl_right.name),
-    );
-    let right_refs = (
-        expr_refers_to_table(expr_right, &tbl_left.name),
-        expr_refers_to_table(expr_right, &tbl_right.name),
-    );
-    // if the SQL-level references unambiguously indicate table ownership, we're done
-    match (left_refs, right_refs) {
-        // standard: left expr → left table, right expr → right table
-        ((true, false), (false, true)) => return Ok((vec![left_on], vec![right_on])),
-        // reversed: left expr → right table, right expr → left table
-        ((false, true), (true, false)) => return Ok((vec![right_on], vec![left_on])),
-        // unsupported: one side references *both* tables
-        ((true, true), _) | (_, (true, true)) if tbl_left.name != tbl_right.name => {
+    let left_side = resolve_table_side(expr_left, &left_on, tbl_left, tbl_right);
+    let right_side = resolve_table_side(expr_right, &right_on, tbl_left, tbl_right);
+
+    // Error if SQL-level qualifiers explicitly reference both tables
+    for (side, label) in [(&left_side, "left"), (&right_side, "right")] {
+        if matches!(side, TableSide::CrossQualified) {
+            if tbl_left.name != tbl_right.name {
+                polars_bail!(
+                    SQLInterface: "unsupported join condition: {} side references both '{}' and '{}'",
+                    label, tbl_left.name, tbl_right.name
+                )
+            }
             polars_bail!(
-               SQLInterface: "unsupported join condition: {} side references both '{}' and '{}'",
-               if left_refs.0 && left_refs.1 {
-                    "left"
-                } else {
-                    "right"
-                }, tbl_left.name, tbl_right.name
+                SQLInterface: "self-join requires table aliases to disambiguate; \
+                use e.g. 'FROM {0} AS a JOIN {0} AS b ON a.col = b.col'",
+                tbl_left.name
             )
-        },
-        // fall through to the more involved col/ref resolution
-        _ => {},
+        }
     }
 
-    // ------------------------------------------------------------------
-    // more involved: additionally employ schema-based column resolution
-    // (applies to unqualified columns and/or chained joins)
-    // ------------------------------------------------------------------
-    let left_on_cols_in = (
-        expr_cols_all_in_schema(&left_on, &tbl_left.schema),
-        expr_cols_all_in_schema(&left_on, &tbl_right.schema),
-    );
-    let right_on_cols_in = (
-        expr_cols_all_in_schema(&right_on, &tbl_left.schema),
-        expr_cols_all_in_schema(&right_on, &tbl_right.schema),
-    );
-    match (left_on_cols_in, right_on_cols_in) {
-        // each expression's columns exist in exactly one schema
-        ((true, false), (false, true)) => Ok((vec![left_on], vec![right_on])),
-        ((false, true), (true, false)) => Ok((vec![right_on], vec![left_on])),
-        // one expression in both, other only in one; prefer the unique one
-        ((true, true), (true, false)) => Ok((vec![right_on], vec![left_on])),
-        ((true, true), (false, true)) => Ok((vec![left_on], vec![right_on])),
-        ((true, false), (true, true)) => Ok((vec![left_on], vec![right_on])),
-        ((false, true), (true, true)) => Ok((vec![right_on], vec![left_on])),
-        // pass through as-is
-        _ => Ok((vec![left_on], vec![right_on])),
+    match (left_side, right_side) {
+        // Standard: left expr → left table, right expr → right table
+        (TableSide::Left, TableSide::Right) => Ok((left_on, right_on)),
+        // Reversed: left expr → right table, right expr → left table
+        (TableSide::Right, TableSide::Left) => Ok((right_on, left_on)),
+        // One side is a literal/constant (no column refs), the other in one table
+        (TableSide::Literal, TableSide::Left) => Ok((right_on, left_on)),
+        (TableSide::Literal, TableSide::Right) => Ok((left_on, right_on)),
+        (TableSide::Left, TableSide::Literal) => Ok((left_on, right_on)),
+        (TableSide::Right, TableSide::Literal) => Ok((right_on, left_on)),
+        // One side has unresolvable columns — error
+        (TableSide::Unknown, _) | (_, TableSide::Unknown) => {
+            polars_bail!(
+                SQLInterface: "unable to resolve column references in join condition; \
+                use qualified names (e.g. 'table.column') to disambiguate"
+            )
+        },
+        // One side exists in both schemas. If the expression is qualified (e.g. `tbl_b.c`)
+        // it's a multi-table chain reference and we assign to the opposite side; if it's
+        // unqualified, it's genuinely ambiguous and we error.
+        (TableSide::AmbiguousSchema, TableSide::Left | TableSide::Right) => resolve_both_side(
+            expr_left,
+            left_on,
+            right_on,
+            matches!(right_side, TableSide::Left),
+            "left",
+        ),
+        (TableSide::Left | TableSide::Right, TableSide::AmbiguousSchema) => resolve_both_side(
+            expr_right,
+            right_on,
+            left_on,
+            matches!(left_side, TableSide::Left),
+            "right",
+        ),
+        (TableSide::AmbiguousSchema, TableSide::AmbiguousSchema) => {
+            polars_bail!(
+                SQLInterface: "ambiguous join condition: columns exist in both tables; \
+                use qualified names (e.g. 'table.column') to disambiguate"
+            )
+        },
+        // One side exists in both schemas and the other is a literal — ambiguous
+        (TableSide::AmbiguousSchema, TableSide::Literal)
+        | (TableSide::Literal, TableSide::AmbiguousSchema) => {
+            polars_bail!(
+                SQLInterface: "ambiguous column reference in join condition: the column exists \
+                in both tables; use qualified names (e.g. 'table.column') to disambiguate"
+            )
+        },
+        // Both sides are literals (e.g. `ON 1 = 1`); pass through as-is (tautological cross-join)
+        (TableSide::Literal, TableSide::Literal) => Ok((left_on, right_on)),
+        // Both sides reference the same table — not a valid cross-table predicate
+        (TableSide::Left, TableSide::Left) | (TableSide::Right, TableSide::Right) => {
+            polars_bail!(
+                SQLInterface: "join condition references only one table; \
+                both sides of the ON predicate must reference different tables"
+            )
+        },
+        // Remaining cases
+        _ => {
+            polars_bail!(
+                SQLInterface: "unable to resolve table assignment for join condition; \
+                use qualified names (e.g. 'table.column') to disambiguate"
+            )
+        },
     }
 }
 
+/// Recursively process a SQL ON-clause expression tree into `JoinConditions`.
+///
+/// - Equi-conditions (`=`) are returned as paired `left_on`/`right_on` entries.
+/// - Non-equi conditions (`<`, `<=`, `>`, `>=`, `!=`) are returned as `join_where` predicates
+///   that reference columns using their merged-schema names (right columns that conflict with the
+///   left schema are suffixed).
 fn process_join_on(
     ctx: &mut SQLContext,
     sql_expr: &SQLExpr,
     tbl_left: &TableInfo,
     tbl_right: &TableInfo,
-) -> PolarsResult<(Vec<Expr>, Vec<Expr>)> {
+    join_schema: &Schema,
+    suffix: &str,
+) -> PolarsResult<JoinConditions> {
     match sql_expr {
         SQLExpr::BinaryOp { left, op, right } => match op {
             SQLBinaryOperator::And => {
-                let (mut left_i, mut right_i) = process_join_on(ctx, left, tbl_left, tbl_right)?;
-                let (mut left_j, mut right_j) = process_join_on(ctx, right, tbl_left, tbl_right)?;
-                left_i.append(&mut left_j);
-                right_i.append(&mut right_j);
-                Ok((left_i, right_i))
+                let mut jc = process_join_on(ctx, left, tbl_left, tbl_right, join_schema, suffix)?;
+                jc.extend(process_join_on(
+                    ctx,
+                    right,
+                    tbl_left,
+                    tbl_right,
+                    join_schema,
+                    suffix,
+                )?);
+                Ok(jc)
             },
             SQLBinaryOperator::Eq => {
-                // establish unified schema with cols from both tables; needed for multi/chained
-                // joins where suffixed intermediary/joined cols aren't in an existing schema.
-                let mut join_schema =
-                    Schema::with_capacity(tbl_left.schema.len() + tbl_right.schema.len());
-                for (name, dtype) in tbl_left.schema.iter() {
-                    join_schema.insert_at_index(join_schema.len(), name.clone(), dtype.clone())?;
-                }
-                for (name, dtype) in tbl_right.schema.iter() {
-                    if !join_schema.contains(name) {
-                        join_schema.insert_at_index(
-                            join_schema.len(),
-                            name.clone(),
-                            dtype.clone(),
-                        )?;
-                    }
-                }
-                determine_left_right_join_on(ctx, left, right, tbl_left, tbl_right, &join_schema)
+                let (l, r) = determine_left_right_join_on(
+                    ctx,
+                    left,
+                    right,
+                    tbl_left,
+                    tbl_right,
+                    join_schema,
+                )?;
+                Ok(JoinConditions::equi(vec![l], vec![r]))
+            },
+            BinaryOperator::Or => polars_bail!(
+                SQLInterface: "OR conditions in JOIN ON clauses are not supported; \
+                consider restructuring the query or using UNION"
+            ),
+            BinaryOperator::Lt
+            | BinaryOperator::LtEq
+            | BinaryOperator::Gt
+            | BinaryOperator::GtEq
+            | BinaryOperator::NotEq => {
+                // Parse both operands and suffix each independently based on whether
+                // it references the right table (preserving SQL operand order).
+                let lhs = suffix_if_right_table(
+                    parse_sql_expr(left, ctx, Some(join_schema))?,
+                    left,
+                    tbl_left,
+                    tbl_right,
+                    suffix,
+                )?;
+                let rhs = suffix_if_right_table(
+                    parse_sql_expr(right, ctx, Some(join_schema))?,
+                    right,
+                    tbl_left,
+                    tbl_right,
+                    suffix,
+                )?;
+                let polars_op = sql_op_to_polars(op).unwrap();
+                let pred = Expr::BinaryExpr {
+                    left: Arc::new(lhs),
+                    op: polars_op,
+                    right: Arc::new(rhs),
+                };
+                Ok(JoinConditions::non_equi(pred))
             },
             _ => polars_bail!(
-                // TODO: should be able to support more operators later (via `join_where`?)
-                SQLInterface: "only equi-join constraints (combined with 'AND') are currently supported; found op = '{:?}'", op
+                SQLInterface: "unsupported join constraint operator '{:?}'", op
             ),
         },
-        SQLExpr::Nested(expr) => process_join_on(ctx, expr, tbl_left, tbl_right),
-        _ => polars_bail!(
-            SQLInterface: "only equi-join constraints are currently supported; found expression = {:?}", sql_expr
-        ),
+        SQLExpr::Nested(expr) => {
+            process_join_on(ctx, expr, tbl_left, tbl_right, join_schema, suffix)
+        },
+        // All other constraints (BETWEEN, LIKE, IN, etc.) now
+        // pass through for use as a `join_where` predicate.
+        other => {
+            let pred = parse_sql_expr(other, ctx, Some(join_schema))?;
+            let right_cols = collect_right_table_column_names(
+                other,
+                &tbl_right.name,
+                &tbl_left.schema,
+                &tbl_right.schema,
+            );
+            let pred = suffix_right_table_columns(
+                pred,
+                &tbl_left.schema,
+                &tbl_right.schema,
+                &right_cols,
+                suffix,
+            );
+            Ok(JoinConditions::non_equi(pred))
+        },
+    }
+}
+
+/// Rename columns in `expr` that exist in both schemas to their suffixed (merged-schema) names.
+fn suffix_conflicting_columns(
+    expr: Expr,
+    left_schema: &Schema,
+    right_schema: &Schema,
+    suffix: &str,
+) -> Expr {
+    expr.map_expr(|e| match e {
+        Expr::Column(ref name)
+            if left_schema.contains(name.as_str()) && right_schema.contains(name.as_str()) =>
+        {
+            Expr::Column(format_pl_smallstr!("{name}{suffix}"))
+        },
+        other => other,
+    })
+}
+
+/// Like `suffix_conflicting_columns`, but only renames columns whose names appear in the
+/// provided `right_cols` set (and that exist in both schemas, i.e. actually conflict).
+fn suffix_right_table_columns(
+    expr: Expr,
+    left_schema: &Schema,
+    right_schema: &Schema,
+    right_cols: &PlHashSet<String>,
+    suffix: &str,
+) -> Expr {
+    expr.map_expr(|e| match e {
+        Expr::Column(ref name)
+            if right_cols.contains(name.as_str())
+                && left_schema.contains(name.as_str())
+                && right_schema.contains(name.as_str()) =>
+        {
+            Expr::Column(format_pl_smallstr!("{name}{suffix}"))
+        },
+        other => other,
+    })
+}
+
+/// Suffix conflicting column names in `expr` if the SQL-level expression references the right
+/// table. Uses table qualifiers first, falling back to schema membership when unqualified.
+/// Errors on ambiguous references (columns exist in both schemas without qualification).
+fn suffix_if_right_table(
+    expr: Expr,
+    sql_expr: &SQLExpr,
+    tbl_left: &TableInfo,
+    tbl_right: &TableInfo,
+    suffix: &str,
+) -> PolarsResult<Expr> {
+    let expr = strip_outer_alias(expr);
+    match resolve_table_side(sql_expr, &expr, tbl_left, tbl_right) {
+        TableSide::Right => Ok(suffix_conflicting_columns(
+            expr,
+            &tbl_left.schema,
+            &tbl_right.schema,
+            suffix,
+        )),
+        TableSide::Left | TableSide::Literal => Ok(expr),
+        TableSide::Unknown => {
+            polars_bail!(
+                SQLInterface: "unable to resolve column references in non-equi join condition; \
+                use qualified names (e.g. 'table.column') to disambiguate"
+            )
+        },
+        TableSide::AmbiguousSchema => {
+            polars_bail!(
+                SQLInterface: "ambiguous column reference in non-equi join condition; \
+                use qualified names (e.g. 'table.column') to disambiguate"
+            )
+        },
+        TableSide::CrossQualified => {
+            polars_bail!(
+                SQLInterface: "non-equi join condition references both '{}' and '{}'; \
+                each side must reference a single table",
+                tbl_left.name, tbl_right.name
+            )
+        },
     }
 }
 
@@ -2676,13 +3232,23 @@ fn process_join_constraint(
     constraint: &JoinConstraint,
     tbl_left: &TableInfo,
     tbl_right: &TableInfo,
+    suffix: &str,
     ctx: &mut SQLContext,
-) -> PolarsResult<(Vec<Expr>, Vec<Expr>)> {
+) -> PolarsResult<JoinConditions> {
+    let mut join_schema = (*tbl_left.schema).clone();
+    for (name, dtype) in tbl_right.schema.iter() {
+        if !join_schema.contains(name) {
+            join_schema.with_column(name.clone(), dtype.clone());
+        }
+    }
     match constraint {
-        JoinConstraint::On(expr @ SQLExpr::BinaryOp { .. }) => {
-            process_join_on(ctx, expr, tbl_left, tbl_right)
+        JoinConstraint::On(expr) => {
+            process_join_on(ctx, expr, tbl_left, tbl_right, &join_schema, suffix)
         },
-        JoinConstraint::Using(idents) if !idents.is_empty() => {
+        JoinConstraint::Using(idents) if idents.is_empty() => {
+            polars_bail!(SQLSyntax: "JOIN \"USING\" clause requires at least one column")
+        },
+        JoinConstraint::Using(idents) => {
             let using: Vec<Expr> = idents
                 .iter()
                 .map(|ObjectName(parts)| {
@@ -2695,22 +3261,204 @@ fn process_join_constraint(
                     }
                 })
                 .collect::<PolarsResult<Vec<_>>>()?;
-            Ok((using.clone(), using))
+            Ok(JoinConditions::equi(using.clone(), using))
         },
         JoinConstraint::Natural => {
-            let left_names = tbl_left.schema.iter_names().collect::<PlHashSet<_>>();
-            let right_names = tbl_right.schema.iter_names().collect::<PlHashSet<_>>();
-            let on: Vec<Expr> = left_names
-                .intersection(&right_names)
-                .map(|&name| col(name.clone()))
+            // Iterate left schema in insertion order (deterministic) and filter
+            // by right schema membership; avoids two HashSet allocations.
+            let on: Vec<Expr> = tbl_left
+                .schema
+                .iter_names()
+                .filter(|name| tbl_right.schema.contains(name))
+                .map(|name| col(name.clone()))
                 .collect();
             if on.is_empty() {
-                polars_bail!(SQLInterface: "no common columns found for NATURAL JOIN")
+                polars_bail!(SQLInterface: "no common columns found for NATURAL JOIN between '{}' and '{}'",
+                    tbl_left.name, tbl_right.name)
             }
-            Ok((on.clone(), on))
+            Ok(JoinConditions::equi(on.clone(), on))
         },
         _ => polars_bail!(SQLInterface: "unsupported SQL join constraint:\n{:?}", constraint),
     }
+}
+
+/// Flatten a SQL AND-expression tree into individual owned leaf conditions.
+fn flatten_and_conditions(expr: SQLExpr) -> Vec<SQLExpr> {
+    let mut conditions = Vec::new();
+    let mut stack = vec![expr];
+    while let Some(current) = stack.pop() {
+        match current {
+            SQLExpr::BinaryOp {
+                left,
+                op: BinaryOperator::And,
+                right,
+            } => {
+                // Push right first so left is processed first (preserves order)
+                stack.push(*right);
+                stack.push(*left);
+            },
+            SQLExpr::Nested(inner) => stack.push(*inner),
+            other => conditions.push(other),
+        }
+    }
+    conditions
+}
+
+/// Reconstruct a SQL AND-expression tree from a list of conditions.
+fn combine_and_conditions(conditions: Vec<SQLExpr>) -> Option<SQLExpr> {
+    conditions
+        .into_iter()
+        .reduce(|left, right| SQLExpr::BinaryOp {
+            left: Box::new(left),
+            op: BinaryOperator::And,
+            right: Box::new(right),
+        })
+}
+
+/// Check if a SQL expression references any table in the given set.
+/// Single-pass traversal: O(m) where m = expression complexity, regardless of table count.
+fn expr_refers_to_any_table(expr: &SQLExpr, tables: &PlHashSet<String>) -> bool {
+    use std::ops::ControlFlow;
+
+    use sqlparser::ast::Visit;
+    struct TableSetChecker<'a> {
+        tables: &'a PlHashSet<String>,
+    }
+    impl sqlparser::ast::Visitor for TableSetChecker<'_> {
+        type Break = ();
+        fn pre_visit_expr(&mut self, expr: &SQLExpr) -> ControlFlow<()> {
+            if let SQLExpr::CompoundIdentifier(idents) = expr {
+                if idents.len() >= 2 && self.tables.contains(&idents[0].value) {
+                    return ControlFlow::Break(());
+                }
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    expr.visit(&mut TableSetChecker { tables }).is_break()
+}
+
+/// Determine which table(s) a single operand of a comparison references, using
+/// both SQL-level qualifiers (e.g. `t1.col`) and schema-based resolution for
+/// unqualified column references. Returns `(refs_left, refs_right)`.
+fn operand_table_refs(
+    expr: &SQLExpr,
+    left_tables: &PlHashSet<String>,
+    right_table: &str,
+    left_schema: &Schema,
+    right_schema: &Schema,
+) -> (bool, bool) {
+    let qual_left = expr_refers_to_any_table(expr, left_tables);
+    let qual_right = expr_refers_to_table(expr, right_table);
+    let (schema_left, schema_right) = check_unqualified_columns(expr, left_schema, right_schema);
+    (qual_left || schema_left, qual_right || schema_right)
+}
+
+/// Classification of an implicit-join WHERE-clause leaf condition.
+enum ImplicitJoinCondKind {
+    /// Extractable as a join predicate (comparison with exclusive left/right operands).
+    JoinComparison,
+    /// References both sides but not extractable (non-comparison or mixed operands).
+    CrossTableOther,
+    /// References only one side or neither (single-table filter condition).
+    Filter,
+}
+
+/// Check if the operand references form an exclusive cross-table comparison:
+/// one operand references only the left side and the other only the right (in either order).
+fn is_exclusive_cross_table(
+    left_refs_left: bool,
+    left_refs_right: bool,
+    right_refs_left: bool,
+    right_refs_right: bool,
+) -> bool {
+    (left_refs_left && !left_refs_right && right_refs_right && !right_refs_left)
+        || (right_refs_left && !right_refs_right && left_refs_right && !left_refs_left)
+}
+
+/// Classify a leaf condition from the WHERE clause for implicit join processing.
+///
+/// - `JoinComparison`: comparison operator (`=`, `<`, `<=`, `>`, `>=`, `!=`) with one
+///   operand exclusively from the left side and the other exclusively from the right.
+/// - `CrossTableOther`: references both sides but cannot be extracted (non-comparison
+///   operators, OR-connected sub-conditions, BETWEEN, LIKE, IN, etc.).
+/// - `Filter`: references only one side or neither (applied as a post-join filter).
+fn classify_implicit_join_condition(
+    expr: &SQLExpr,
+    left_tables: &PlHashSet<String>,
+    right_table: &str,
+    left_schema: &Schema,
+    right_schema: &Schema,
+) -> ImplicitJoinCondKind {
+    // Check for comparison BinaryOps with exclusively cross-table operands
+    if let SQLExpr::BinaryOp { left, op, right } = expr {
+        if sql_op_to_polars(op).is_some() {
+            let (ll, lr) =
+                operand_table_refs(left, left_tables, right_table, left_schema, right_schema);
+            let (rl, rr) =
+                operand_table_refs(right, left_tables, right_table, left_schema, right_schema);
+
+            if is_exclusive_cross_table(ll, lr, rl, rr) {
+                return ImplicitJoinCondKind::JoinComparison;
+            }
+        }
+    }
+    // Unwrap parenthesized expressions
+    if let SQLExpr::Nested(inner) = expr {
+        return classify_implicit_join_condition(
+            inner,
+            left_tables,
+            right_table,
+            left_schema,
+            right_schema,
+        );
+    }
+    // Default: check if the whole expression references both sides
+    let (refs_left, refs_right) =
+        operand_table_refs(expr, left_tables, right_table, left_schema, right_schema);
+    if refs_left && refs_right {
+        ImplicitJoinCondKind::CrossTableOther
+    } else {
+        ImplicitJoinCondKind::Filter
+    }
+}
+
+/// Partition a WHERE clause into join predicates (bridging left tables and the right
+/// table), residual filter conditions, and a flag indicating whether any non-extractable
+/// cross-table conditions were found (e.g. OR-connected or non-comparison predicates).
+fn extract_join_predicates(
+    where_expr: Option<SQLExpr>,
+    left_tables: &PlHashSet<String>,
+    right_table: &str,
+    left_schema: &Schema,
+    right_schema: &Schema,
+) -> (Option<SQLExpr>, Option<SQLExpr>, bool) {
+    let Some(expr) = where_expr else {
+        return (None, None, false);
+    };
+    let (mut join_conds, mut filter_conds) = (Vec::new(), Vec::new());
+    let mut has_unextractable_cross_table = false;
+    for cond in flatten_and_conditions(expr) {
+        match classify_implicit_join_condition(
+            &cond,
+            left_tables,
+            right_table,
+            left_schema,
+            right_schema,
+        ) {
+            ImplicitJoinCondKind::JoinComparison => join_conds.push(cond),
+            ImplicitJoinCondKind::CrossTableOther => {
+                has_unextractable_cross_table = true;
+                filter_conds.push(cond);
+            },
+            ImplicitJoinCondKind::Filter => filter_conds.push(cond),
+        }
+    }
+    (
+        combine_and_conditions(join_conds),
+        combine_and_conditions(filter_conds),
+        has_unextractable_cross_table,
+    )
 }
 
 /// Extract table identifiers referenced in a SQL query; uses a visitor to
