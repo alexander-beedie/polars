@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 import pytest
 
@@ -70,6 +73,53 @@ def test_join_anti_semi(sql: str, expected: pl.DataFrame) -> None:
     }
     ctx = pl.SQLContext(frames, eager=True)
     assert_frame_equal(expected, ctx.execute(sql))
+
+
+def test_join_right_semi_anti_on_clause() -> None:
+    df1 = pl.DataFrame({"id": [1, 2, 3], "x": [10, 20, 30]})
+    df2 = pl.DataFrame({"id": [2, 3, 4], "y": [200, 300, 400]})
+
+    ctx = pl.SQLContext({"df1": df1, "df2": df2}, eager=True)
+
+    # RIGHT SEMI → keeps right rows that match
+    result = ctx.execute("""
+        SELECT df2.id, df2.y
+        FROM df1 RIGHT SEMI JOIN df2 ON df1.id = df2.id
+        ORDER BY df2.id
+    """)
+    assert_frame_equal(
+        result,
+        pl.DataFrame({"id": [2, 3], "y": [200, 300]}),
+        check_dtypes=False,
+    )
+
+    # RIGHT ANTI → keeps right rows that DON'T match
+    result = ctx.execute("""
+        SELECT df2.id, df2.y
+        FROM df1 RIGHT ANTI JOIN df2 ON df1.id = df2.id
+        ORDER BY df2.id
+    """)
+    assert_frame_equal(
+        result,
+        pl.DataFrame({"id": [4], "y": [400]}),
+        check_dtypes=False,
+    )
+
+
+def test_join_on_parenthesized_condition() -> None:
+    assert_sql_matches(
+        frames={
+            "df1": pl.DataFrame({"a": [1, 2, 3], "b": [10, 20, 30]}),
+            "df2": pl.DataFrame({"a": [2, 3, 4], "c": ["x", "y", "z"]}),
+        },
+        query="""
+            SELECT df1.a, df1.b, df2.c
+            FROM df1 INNER JOIN df2 ON (df1.a = df2.a)
+            ORDER BY df1.a
+        """,
+        compare_with="sqlite",
+        expected={"a": [2, 3], "b": [20, 30], "c": ["x", "y"]},
+    )
 
 
 def test_join_cross() -> None:
@@ -366,50 +416,318 @@ def test_join_misc_16255() -> None:
     assert res.rows() == [(1, "open", "closed")]
 
 
-@pytest.mark.parametrize(
-    "constraint", ["tbl.a != tbl.b", "tbl.a > tbl.b", "a >= b", "a < b", "b <= a"]
-)
-def test_non_equi_joins(constraint: str) -> None:
-    # no support (yet) for non equi-joins in polars joins
-    # TODO: integrate awareness of new IEJoin
-    with (
-        pytest.raises(
-            SQLInterfaceError,
-            match=r"only equi-join constraints \(combined with 'AND'\) are currently supported",
-        ),
-        pl.SQLContext({"tbl": pl.DataFrame({"a": [1, 2, 3], "b": [4, 3, 2]})}) as ctx,
-    ):
-        ctx.execute(
-            f"""
-            SELECT *
-            FROM tbl
-            LEFT JOIN tbl ON {constraint}  -- not an equi-join
+def test_implicit_join() -> None:
+    df1 = pl.DataFrame({"a": [1, 2, 3, 4, 5], "b": [1, 3, 4, 4, 5]})
+    df2 = pl.DataFrame({"a": [1, 2, 3, 4, 5], "b": [0, 3, 4, 5, 6]})
+    df3 = pl.DataFrame(
+        {"a": [1, 2, 3, 4, 5], "b": [0, 3, 4, 5, 7], "c": [1, 3, 4, 5, 7]}
+    )
+    frames: dict[str, pl.DataFrame | pl.LazyFrame] = {
+        "df1": df1,
+        "df2": df2,
+        "df3": df3,
+    }
+
+    # two tables
+    assert_sql_matches(
+        frames=frames,
+        query="""
+            SELECT df1.a, df1.b, df2.b AS b2
+            FROM df1, df2
+            WHERE df1.a = df2.a AND df1.b = df2.b
+        """,
+        compare_with="sqlite",
+        expected={"a": [2, 3], "b": [3, 4], "b2": [3, 4]},
+    )
+
+    # three tables (varying FROM order)
+    for tables in ("df1, df2, df3", "df3, df2, df1", "df2, df3, df1"):
+        assert_sql_matches(
+            frames=frames,
+            query=f"""
+                SELECT df1.a, df1.b, df3.c
+                FROM {tables}
+                WHERE df1.a = df2.a
+                  AND df3.a = df1.a
+                  AND df1.b = df2.b
+                  AND df3.b = df1.b
+            """,
+            compare_with="sqlite",
+            expected={"a": [2, 3], "b": [3, 4], "c": [3, 4]},
+        )
+
+    # three tables, third references second table
+    assert_sql_matches(
+        frames=frames,
+        query="""
+            SELECT df1.a, df1.b, df3.c
+            FROM df1, df2, df3
+            WHERE df1.a = df2.a AND df1.b = df2.b
+              AND df3.a = df2.a AND df3.b = df2.b
+        """,
+        compare_with="sqlite",
+        expected={"a": [2, 3], "b": [3, 4], "c": [3, 4]},
+    )
+
+    # with residual (non-join) filter
+    assert_sql_matches(
+        frames=frames,
+        query="""
+            SELECT df1.a, df1.b, df2.b AS b2
+            FROM df1, df2
+            WHERE df1.a = df2.a AND df1.a > 2
+        """,
+        compare_with="sqlite",
+        expected={"a": [3, 4, 5], "b": [4, 4, 5], "b2": [4, 5, 6]},
+    )
+
+    # mixed implicit + explicit join
+    assert_sql_matches(
+        frames=frames,
+        query="""
+            SELECT df1.a, df1.b, df3.c
+            FROM df1, df2 INNER JOIN df3 ON df2.a = df3.a
+            WHERE df1.a = df2.a
+            ORDER BY df1.a
+        """,
+        compare_with="sqlite",
+        expected={
+            "a": [1, 2, 3, 4, 5],
+            "b": [1, 3, 4, 4, 5],
+            "c": [1, 3, 4, 5, 7],
+        },
+    )
+
+    # OR filter on already-joined tables (residual, not join predicate)
+    assert_sql_matches(
+        frames=frames,
+        query="""
+            SELECT df1.a, df1.b, df3.c
+            FROM df1, df2, df3
+            WHERE df1.a = df2.a
+              AND df1.a = df3.a
+              AND (df1.b = df2.b OR df1.b = df3.b)
+            ORDER BY df1.a
+        """,
+        compare_with="sqlite",
+        expected={"a": [2, 3], "b": [3, 4], "c": [3, 4]},
+    )
+
+
+def test_implicit_cross_join() -> None:
+    t1 = pl.DataFrame({"x": [1, 2, 3]})
+    t2 = pl.DataFrame({"y": [10, 20]})
+    frames: dict[str, pl.DataFrame | pl.LazyFrame] = {"t1": t1, "t2": t2}
+
+    # no join predicate → cross join
+    assert_sql_matches(
+        frames=frames,
+        query="SELECT * FROM t1, t2 ORDER BY x, y",
+        compare_with="sqlite",
+        expected={"x": [1, 1, 2, 2, 3, 3], "y": [10, 20, 10, 20, 10, 20]},
+    )
+
+    # single-table filter → cross join + filter
+    assert_sql_matches(
+        frames=frames,
+        query="SELECT * FROM t1, t2 WHERE t1.x > 1 ORDER BY t1.x, t2.y",
+        compare_with="sqlite",
+        expected={"x": [2, 2, 3, 3], "y": [10, 20, 10, 20]},
+    )
+
+
+def test_implicit_self_join() -> None:
+    t = pl.DataFrame({"id": [1, 2, 3], "val": [10, 20, 30]})
+
+    assert_sql_matches(
+        frames={"t": t},
+        query="""
+            SELECT a.id, a.val AS val_a, b.val AS val_b
+            FROM t AS a, t AS b
+            WHERE a.id = b.id
+            ORDER BY a.id
+        """,
+        compare_with="sqlite",
+        expected={"id": [1, 2, 3], "val_a": [10, 20, 30], "val_b": [10, 20, 30]},
+    )
+
+
+def test_non_equi_join() -> None:
+    orders = pl.DataFrame(
+        {"id": [1, 2, 3, 4, 5], "amount": [50, 100, 200, 150, 300]},
+    )
+    thresholds = pl.DataFrame(
+        {"tier": ["bronze", "silver", "gold"], "min_amount": [0, 100, 200]}
+    )
+    ranges = pl.DataFrame(
+        {"label": ["low", "mid", "high"], "lo": [0, 100, 200], "hi": [99, 199, 500]},
+    )
+    frames: dict[str, pl.DataFrame | pl.LazyFrame] = {
+        "orders": orders,
+        "thresholds": thresholds,
+    }
+
+    # strict greater-than
+    assert_sql_matches(
+        frames=frames,
+        query="""
+            SELECT orders.id, orders.amount, thresholds.tier
+            FROM orders
+            INNER JOIN thresholds ON orders.amount > thresholds.min_amount
+            ORDER BY orders.id, thresholds.min_amount
+        """,
+        compare_with="sqlite",
+        expected={
+            "id": [1, 2, 3, 3, 4, 4, 5, 5, 5],
+            "amount": [50, 100, 200, 200, 150, 150, 300, 300, 300],
+            "tier": [
+                "bronze",
+                "bronze",
+                "bronze",
+                "silver",
+                "bronze",
+                "silver",
+                "bronze",
+                "silver",
+                "gold",
+            ],
+        },
+    )
+
+    # not-equal
+    t1 = pl.DataFrame({"x": [1, 2, 3]})
+    t2 = pl.DataFrame({"y": [1, 2, 3]})
+
+    assert_sql_matches(
+        frames={"t1": t1, "t2": t2},
+        query="""
+            SELECT t1.x, t2.y
+            FROM t1 INNER JOIN t2 ON t1.x != t2.y
+            ORDER BY t1.x, t2.y
+        """,
+        compare_with="sqlite",
+        expected={"x": [1, 1, 2, 2, 3, 3], "y": [2, 3, 1, 3, 1, 2]},
+    )
+
+    expected: dict[str, Sequence[Any]] = {
+        "id": [1, 2, 3, 4, 5],
+        "amount": [50, 100, 200, 150, 300],
+        "label": ["low", "mid", "high", "mid", "high"],
+    }
+
+    # explicit JOIN ... ON
+    assert_sql_matches(
+        frames={"orders": orders, "ranges": ranges},
+        query="""
+            SELECT orders.id, orders.amount, ranges.label
+            FROM orders
+            INNER JOIN ranges ON
+                (orders.amount >= ranges.lo) AND
+                (orders.amount <= ranges.hi)
+            ORDER BY orders.id
+        """,
+        compare_with="sqlite",
+        expected=expected,
+    )
+
+    # implicit join with the same condition
+    assert_sql_matches(
+        frames={"orders": orders, "ranges": ranges},
+        query="""
+            SELECT orders.id, orders.amount, ranges.label
+            FROM orders, ranges
+            WHERE orders.amount >= ranges.lo AND orders.amount <= ranges.hi
+            ORDER BY orders.id
+        """,
+        compare_with="sqlite",
+        expected=expected,
+    )
+
+
+def test_mixed_equi_non_equi_join() -> None:
+    products = pl.DataFrame(
+        {
+            "id": [1, 2, 3, 4],
+            "category": ["A", "A", "B", "B"],
+            "price": [10, 20, 30, 40],
+        }
+    )
+    discounts = pl.DataFrame(
+        {
+            "category": ["A", "A", "B"],
+            "min_price": [0, 15, 25],
+            "discount": [5, 10, 15],
+        }
+    )
+
+    assert_sql_matches(
+        frames={"products": products, "discounts": discounts},
+        query="""
+            SELECT products.id, products.category, products.price, discounts.discount
+            FROM products
+            INNER JOIN discounts
+              ON products.category = discounts.category
+             AND products.price > discounts.min_price
+            ORDER BY products.id, discounts.min_price
+        """,
+        compare_with="sqlite",
+        expected={
+            "id": [1, 2, 2, 3, 4],
+            "category": ["A", "A", "A", "B", "B"],
+            "price": [10, 20, 20, 30, 40],
+            "discount": [5, 5, 10, 15, 15],
+        },
+    )
+
+
+def test_non_equi_self_join_errors() -> None:
+    tbl = pl.DataFrame({"a": [1, 2, 3], "b": [4, 3, 2]})
+
+    # qualified self-join non-equi condition: both sides reference same table
+    with pytest.raises(SQLInterfaceError, match="references both"):
+        pl.sql("SELECT * FROM tbl LEFT JOIN tbl ON tbl.a != tbl.b")
+
+    # unqualified self-join non-equi condition: ambiguous column reference
+    with pytest.raises(SQLInterfaceError, match="ambiguous"):
+        pl.sql("SELECT * FROM tbl LEFT JOIN tbl ON a >= b")
+
+
+def test_join_error_cases() -> None:
+    df1 = pl.DataFrame({"a": [1, 2, 3, 4, 5], "b": [1, 3, 4, 4, 5]})
+    df2 = pl.DataFrame({"a": [1, 2, 3, 4, 5], "b": [0, 3, 4, 5, 6]})
+    df3 = pl.DataFrame(
+        {"a": [1, 2, 3, 4, 5], "b": [0, 3, 4, 5, 7], "c": [1, 3, 4, 5, 7]}
+    )
+
+    # OR-connected cross-table predicates in implicit join
+    with pytest.raises(SQLInterfaceError, match="cross-table predicates"):
+        pl.sql("SELECT * FROM df1, df2 WHERE df1.a = df2.a OR df1.b = df2.b")
+
+    # OR cross-table predicate for third table
+    with pytest.raises(SQLInterfaceError, match="cross-table predicates"):
+        pl.sql(
+            """
+            SELECT * FROM df1, df2, df3
+            WHERE df1.a = df2.a
+              AND (df3.a = df1.a OR df3.b = df2.b)
             """
         )
 
+    # unnamed derived table in implicit join
+    with pytest.raises(SQLInterfaceError, match="provide an alias"):
+        pl.sql("SELECT * FROM (SELECT 1 AS x), df2")
 
-def test_implicit_joins() -> None:
-    # no support for this yet; ensure we catch it
-    with (
-        pytest.raises(
-            SQLInterfaceError,
-            match=r"not currently supported .* use explicit JOIN syntax instead",
-        ),
-        pl.SQLContext(
-            {
-                "tbl": pl.DataFrame(
-                    {"a": [1, 2, 3], "b": [4, 3, 2], "c": ["x", "y", "z"]}
-                )
-            }
-        ) as ctx,
-    ):
-        ctx.execute(
-            """
-            SELECT t1.*
-            FROM tbl AS t1, tbl AS t2
-            WHERE t1.a = t2.b
-            """
-        )
+    # both sides of ON reference the same table
+    with pytest.raises(SQLInterfaceError, match="both sides of the ON predicate must reference different tables"):
+        pl.sql("SELECT * FROM df1 INNER JOIN df2 ON df2.a = df2.b")
+
+    # ambiguous unqualified column in ON
+    with pytest.raises(SQLInterfaceError, match="ambiguous"):
+        pl.sql("SELECT * FROM df1 INNER JOIN df2 ON a = a")
+
+    # OR in explicit JOIN ON clause
+    with pytest.raises(SQLInterfaceError, match="OR"):
+        pl.sql("SELECT * FROM df1 INNER JOIN df2 ON df1.a = df2.a OR df1.b = df2.b")
 
 
 @pytest.mark.parametrize(
@@ -782,7 +1100,10 @@ def test_unnamed_nested_join_relation() -> None:
 
     with (
         pl.SQLContext({"left": df, "right": df}) as ctx,
-        pytest.raises(SQLInterfaceError, match="cannot JOIN on unnamed relation"),
+        pytest.raises(
+            SQLInterfaceError,
+            match="unable to resolve table assignment",
+        ),
     ):
         ctx.execute(
             """
@@ -1370,4 +1691,243 @@ def test_qualified_wildcard_combinations(query: str, expected: dict[str, Any]) -
         left=pl.DataFrame(expected),
         right=pl.sql(query).collect(),
         check_row_order=False,
+    )
+
+
+def test_natural_join_no_common_columns() -> None:
+    df1 = pl.DataFrame({"a": [1, 2]})
+    df2 = pl.DataFrame({"b": [3, 4]})
+
+    with pytest.raises(SQLInterfaceError, match="no common columns"):
+        pl.sql("SELECT * FROM df1 NATURAL JOIN df2").collect()
+
+
+def test_cross_join_with_constraint_error() -> None:
+    df1 = pl.DataFrame({"a": [1]})
+    df2 = pl.DataFrame({"b": [2]})
+
+    # SQL parser rejects CROSS JOIN with ON/USING at the syntax level
+    with pytest.raises(SQLInterfaceError, match="sql parser error"):
+        pl.sql("SELECT * FROM df1 CROSS JOIN df2 ON df1.a = df2.b").collect()
+
+    with pytest.raises(SQLInterfaceError, match="sql parser error"):
+        pl.sql("SELECT * FROM df1 CROSS JOIN df2 USING (a)").collect()
+
+
+def test_non_equi_left_join_error() -> None:
+    """Non-equi conditions with LEFT JOIN should raise an error."""
+    orders = pl.DataFrame({"id": [1, 2, 3], "amount": [50, 150, 300]})
+    thresholds = pl.DataFrame(
+        {"tier": ["bronze", "gold"], "min_amount": [0, 200]}
+    )
+
+    with pytest.raises(SQLInterfaceError, match="non-equi join conditions"):
+        pl.SQLContext(
+            orders=orders, thresholds=thresholds
+        ).execute(
+            """
+            SELECT orders.id, orders.amount, thresholds.tier
+            FROM orders
+            LEFT JOIN thresholds ON orders.amount > thresholds.min_amount
+            ORDER BY orders.id, thresholds.min_amount
+            """
+        ).collect()
+
+
+def test_non_equi_inner_join() -> None:
+    """Pure non-equi INNER JOIN works correctly via join_where."""
+    orders = pl.DataFrame({"id": [1, 2, 3], "amount": [50, 150, 300]})
+    thresholds = pl.DataFrame(
+        {"tier": ["bronze", "gold"], "min_amount": [0, 200]}
+    )
+
+    assert_sql_matches(
+        frames={"orders": orders, "thresholds": thresholds},
+        query="""
+            SELECT orders.id, orders.amount, thresholds.tier
+            FROM orders
+            INNER JOIN thresholds ON orders.amount > thresholds.min_amount
+            ORDER BY orders.id, thresholds.min_amount
+        """,
+        compare_with="sqlite",
+        expected={
+            "id": [1, 2, 3, 3],
+            "amount": [50, 150, 300, 300],
+            "tier": ["bronze", "bronze", "bronze", "gold"],
+        },
+    )
+
+
+def test_non_equi_self_join_with_aliases() -> None:
+    tbl = pl.DataFrame({"id": [1, 2, 3], "val": [10, 20, 30]})
+
+    assert_sql_matches(
+        frames={"tbl": tbl},
+        query="""
+            SELECT a.id AS id_a, b.id AS id_b, a.val AS val_a, b.val AS val_b
+            FROM tbl AS a INNER JOIN tbl AS b ON a.val > b.val
+            ORDER BY a.id, b.id
+        """,
+        compare_with="sqlite",
+        expected={
+            "id_a": [2, 3, 3],
+            "id_b": [1, 1, 2],
+            "val_a": [20, 30, 30],
+            "val_b": [10, 10, 20],
+        },
+    )
+
+
+def test_implicit_join_four_tables() -> None:
+    df1 = pl.DataFrame({"id": [1, 2, 3], "a": [10, 20, 30]})
+    df2 = pl.DataFrame({"id": [1, 2, 3], "b": [100, 200, 300]})
+    df3 = pl.DataFrame({"id": [1, 2, 3], "c": ["x", "y", "z"]})
+    df4 = pl.DataFrame({"id": [1, 2, 3], "d": [1.1, 2.2, 3.3]})
+
+    assert_sql_matches(
+        frames={"df1": df1, "df2": df2, "df3": df3, "df4": df4},
+        query="""
+            SELECT df1.id, df1.a, df2.b, df3.c, df4.d
+            FROM df1, df2, df3, df4
+            WHERE df1.id = df2.id AND df2.id = df3.id AND df3.id = df4.id
+            ORDER BY df1.id
+        """,
+        compare_with="sqlite",
+        expected={
+            "id": [1, 2, 3],
+            "a": [10, 20, 30],
+            "b": [100, 200, 300],
+            "c": ["x", "y", "z"],
+            "d": [1.1, 2.2, 3.3],
+        },
+    )
+
+
+def test_mixed_equi_non_equi_left_join() -> None:
+    """Non-equi conditions with outer joins should raise an error.
+
+    The join_where path (Cross + Filter) does not preserve outer join semantics,
+    so we error rather than silently producing wrong results. When outer join
+    support is added to join_where, this test should be updated to validate
+    the correct result instead.
+    """
+    products = pl.DataFrame(
+        {"id": [1, 2, 3], "cat": ["A", "B", "C"], "price": [10, 30, 50]}
+    )
+    discounts = pl.DataFrame(
+        {"cat": ["A", "B"], "min_price": [5, 25], "disc": [1, 2]}
+    )
+
+    with pytest.raises(SQLInterfaceError, match="non-equi join conditions"):
+        pl.SQLContext(
+            products=products, discounts=discounts
+        ).execute(
+            """
+            SELECT products.id, products.cat, discounts.disc
+            FROM products
+            LEFT JOIN discounts
+              ON products.cat = discounts.cat
+              AND products.price > discounts.min_price
+            ORDER BY products.id
+            """
+        ).collect()
+
+
+def test_natural_right_join() -> None:
+    """NATURAL RIGHT JOIN preserves unmatched right rows with NULL left columns."""
+    df1 = pl.DataFrame({"id": [1, 2, 3], "a": [10, 20, 30]})
+    df2 = pl.DataFrame({"id": [2, 3, 4], "b": [200, 300, 400]})
+
+    assert_sql_matches(
+        frames={"df1": df1, "df2": df2},
+        query="""
+            SELECT id, a, b
+            FROM df1 NATURAL RIGHT JOIN df2
+            ORDER BY id
+        """,
+        compare_with="sqlite",
+        expected={
+            "id": [2, 3, 4],
+            "a": [20, 30, None],
+            "b": [200, 300, 400],
+        },
+    )
+
+
+def test_natural_full_join() -> None:
+    """NATURAL FULL JOIN preserves unmatched rows from both sides."""
+    df1 = pl.DataFrame({"id": [1, 2, 3], "a": [10, 20, 30]})
+    df2 = pl.DataFrame({"id": [2, 3, 4], "b": [200, 300, 400]})
+
+    assert_sql_matches(
+        frames={"df1": df1, "df2": df2},
+        query="""
+            SELECT id, a, b
+            FROM df1 NATURAL FULL JOIN df2
+            ORDER BY id
+        """,
+        compare_with="sqlite",
+        expected={
+            "id": [1, 2, 3, 4],
+            "a": [10, 20, 30, None],
+            "b": [None, 200, 300, 400],
+        },
+    )
+
+
+def test_implicit_join_unqualified_filter() -> None:
+    """Unqualified columns in WHERE are not treated as join predicates.
+
+    They remain as residual filters after a CROSS JOIN.
+    """
+    t1 = pl.DataFrame({"x": [1, 2], "y": [10, 20]})
+    t2 = pl.DataFrame({"z": [100, 200]})
+
+    assert_sql_matches(
+        frames={"t1": t1, "t2": t2},
+        query="SELECT * FROM t1, t2 WHERE x = 1 ORDER BY z",
+        compare_with="sqlite",
+        expected={"x": [1, 1], "y": [10, 10], "z": [100, 200]},
+    )
+
+
+def test_implicit_join_third_table_references_second() -> None:
+    """Third table in an implicit join referencing only the second table."""
+    t1 = pl.DataFrame({"a": [1, 2, 3]})
+    t2 = pl.DataFrame({"b": [1, 2, 3], "c": [10, 20, 30]})
+    t3 = pl.DataFrame({"c": [10, 20, 30], "d": ["x", "y", "z"]})
+
+    assert_sql_matches(
+        frames={"t1": t1, "t2": t2, "t3": t3},
+        query="""
+            SELECT t1.a, t2.b, t3.d
+            FROM t1, t2, t3
+            WHERE t1.a = t2.b AND t2.c = t3.c
+            ORDER BY t1.a
+        """,
+        compare_with="sqlite",
+        expected={"a": [1, 2, 3], "b": [1, 2, 3], "d": ["x", "y", "z"]},
+    )
+
+
+def test_implicit_join_single_non_equi() -> None:
+    """Implicit join with a single non-equi (greater-than) condition."""
+    t1 = pl.DataFrame({"id": [1, 2, 3], "val": [10, 20, 30]})
+    t2 = pl.DataFrame({"id": [1, 2, 3], "val": [15, 25, 35]})
+
+    assert_sql_matches(
+        frames={"t1": t1, "t2": t2},
+        query="""
+            SELECT t1.id AS id1, t2.id AS id2, t1.val AS v1, t2.val AS v2
+            FROM t1, t2
+            WHERE t1.val > t2.val
+            ORDER BY t1.id, t2.id
+        """,
+        compare_with="sqlite",
+        expected={
+            "id1": [2, 3, 3],
+            "id2": [1, 1, 2],
+            "v1": [20, 30, 30],
+            "v2": [15, 15, 25],
+        },
     )
