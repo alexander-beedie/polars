@@ -1346,6 +1346,16 @@ def test_from_epoch(input_dtype: PolarsDataType) -> None:
         _ = ldf.select(pl.from_epoch(ts_col, time_unit="s2"))  # type: ignore[call-overload]
 
 
+@pytest.mark.parametrize("input_dtype", [pl.UInt32, pl.Int32])
+def test_from_epoch_27107(input_dtype: PolarsDataType) -> None:
+    epoch_s = 1721068200  # 2024-07-15 18:30:00 UTC
+    ldf = pl.LazyFrame([pl.Series("timestamp_s", [epoch_s], dtype=input_dtype)])
+    res = ldf.select(pl.from_epoch("timestamp_s", time_unit="s"))
+
+    expected = pl.DataFrame([pl.Series("timestamp_s", [datetime(2024, 7, 15, 18, 30)])])
+    assert_frame_equal(res.collect(), expected)
+
+
 def test_from_epoch_str() -> None:
     ldf = pl.LazyFrame(
         [
