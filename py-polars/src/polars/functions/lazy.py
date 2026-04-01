@@ -2632,11 +2632,11 @@ def from_epoch(
     if time_unit == "d":
         return column.cast(Date)
     if time_unit in (scale := {"s": 1_000_000, "ms": 1_000}):
-        if isinstance(column, pl.Series) and column.dtype.is_integer():
-            column = column.cast(Int64)
-        elif isinstance(column, pl.Expr):
+        if isinstance(column, pl.Expr):
             column = column * F.lit(scale[time_unit], dtype=Int64)
             return column.cast(Datetime("us"))
+        if isinstance(column, pl.Series) and column.dtype.is_integer():
+            column = column.cast(Int64)
         return (column * scale[time_unit]).cast(Datetime("us"))
     if time_unit in DTYPE_TEMPORAL_UNITS:
         return column.cast(Datetime(time_unit))  # type: ignore[arg-type]
