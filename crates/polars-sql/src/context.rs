@@ -19,9 +19,9 @@ use sqlparser::ast::{
     TableFactor, TableWithJoins, Truncate, UnaryOperator as SQLUnaryOperator, Value as SQLValue,
     ValueWithSpan, Values, Visit, WildcardAdditionalOptions, WindowSpec,
 };
-use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::{Parser, ParserOptions};
 
+use crate::dialect::PolarsSQLDialect;
 use crate::function_registry::{DefaultFunctionRegistry, FunctionRegistry};
 use crate::sql_expr::{
     parse_sql_array, parse_sql_expr, resolve_compound_identifier, to_sql_interface_err,
@@ -243,7 +243,8 @@ impl SQLContext {
     /// # }
     ///```
     pub fn execute(&mut self, query: &str) -> PolarsResult<LazyFrame> {
-        let mut parser = Parser::new(&GenericDialect);
+        let dialect = PolarsSQLDialect::new();
+        let mut parser = Parser::new(&dialect);
         parser = parser.with_options(ParserOptions {
             trailing_commas: true,
             ..Default::default()
@@ -2301,25 +2302,7 @@ impl SQLContext {
         let schema = self.get_frame_schema(&mut lf)?;
         let columns_iter = schema.iter_names().map(|e| col(e.clone()));
         let (order_by, order_by_all, n_order_cols) = match &order_by.as_ref().unwrap().kind {
-            OrderByKind::Expressions(exprs) => {
-                // TODO: will look at making an upstream PR that allows us to more easily
-                //  create a GenericDialect variant supporting "OrderByKind::All" instead
-                if exprs.len() == 1
-                    && matches!(&exprs[0].expr, SQLExpr::Identifier(ident)
-                        if ident.value.to_uppercase() == "ALL"
-                        && !schema.iter_names().any(|name| name.to_uppercase() == "ALL"))
-                {
-                    // Treat as ORDER BY ALL
-                    let n_cols = if let Some(selected) = selected {
-                        selected.len()
-                    } else {
-                        schema.len()
-                    };
-                    (vec![], Some(&exprs[0].options), n_cols)
-                } else {
-                    (exprs.clone(), None, exprs.len())
-                }
-            },
+            OrderByKind::Expressions(exprs) => (exprs.clone(), None, exprs.len()),
             OrderByKind::All(opts) => {
                 let n_cols = if let Some(selected) = selected {
                     selected.len()
@@ -3315,7 +3298,8 @@ pub fn extract_table_identifiers(
     include_schema: bool,
     unique: bool,
 ) -> PolarsResult<Vec<String>> {
-    let mut parser = Parser::new(&GenericDialect);
+    let dialect = PolarsSQLDialect::new();
+    let mut parser = Parser::new(&dialect);
     parser = parser.with_options(ParserOptions {
         trailing_commas: true,
         ..Default::default()

@@ -24,12 +24,12 @@ use sqlparser::ast::{
     SelectItem, Subscript, TimezoneInfo, TrimWhereField, TypedString,
     UnaryOperator as SQLUnaryOperator, Value as SQLValue, ValueWithSpan,
 };
-use sqlparser::dialect::GenericDialect;
 use sqlparser::keywords;
 use sqlparser::parser::{Parser, ParserOptions};
 use sqlparser::tokenizer::Token;
 
 use crate::SQLContext;
+use crate::dialect::PolarsSQLDialect;
 use crate::functions::SQLFunctionVisitor;
 use crate::types::{
     bitstring_to_bytes_literal, is_iso_date, is_iso_datetime, is_iso_time, map_sql_dtype_to_polars,
@@ -1300,7 +1300,8 @@ pub fn sql_expr<S: AsRef<str>>(s: S) -> PolarsResult<Expr> {
     let mut ctx = SQLContext::new();
     let s = s.as_ref();
 
-    let mut parser = Parser::new(&GenericDialect);
+    let dialect = PolarsSQLDialect::new();
+    let mut parser = Parser::new(&dialect);
     parser = parser.with_options(ParserOptions {
         trailing_commas: true,
         ..Default::default()

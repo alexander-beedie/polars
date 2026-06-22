@@ -117,13 +117,17 @@ def test_order_by_misc_selection() -> None:
     res = df.sql("SELECT (x % y) AS xmy FROM self ORDER BY x % y NULLS FIRST")
     assert res.to_dict(as_series=False) == {"xmy": [None, None, 1, 3]}
 
-    # confirm that 'order by all' syntax prioritises cols
+    # bare 'ORDER BY ALL' always orders by all columns; a column literally
+    # named "ALL" must be quoted to be referenced as an ordering column.
     df = pl.DataFrame({"SOME": [0, 1], "ALL": [1, 0]})
     res = df.sql("SELECT * FROM self ORDER BY ALL")
-    assert res.to_dict(as_series=False) == {"SOME": [1, 0], "ALL": [0, 1]}
+    assert res.to_dict(as_series=False) == {"SOME": [0, 1], "ALL": [1, 0]}
 
     res = df.sql("SELECT * FROM self ORDER BY ALL DESC")
-    assert res.to_dict(as_series=False) == {"SOME": [0, 1], "ALL": [1, 0]}
+    assert res.to_dict(as_series=False) == {"SOME": [1, 0], "ALL": [0, 1]}
+
+    res = df.sql('SELECT * FROM self ORDER BY "ALL"')
+    assert res.to_dict(as_series=False) == {"SOME": [1, 0], "ALL": [0, 1]}
 
 
 def test_order_by_misc_16579() -> None:

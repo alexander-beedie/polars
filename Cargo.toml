@@ -98,7 +98,9 @@ sha2 = "0.11"
 simd-json = { version = "0.17", features = ["known-key", "128bit"] }
 simdutf8 = "0.1.4"
 slotmap = "1"
-sqlparser = { version = "0.62", features = ["visitor"] }
+# NOTE: temporarily pinning to the v0.62.0 tag (not crates.io) as the `derive_dialect!` only works in the
+# associated `sqlparser_derive`, whioh was (mistakenly?) not published alongside the main v0.62.0 release
+sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs.git", tag = "v0.62.0", features = ["derive-dialect", "visitor"] }
 stacker = "0.1"
 streaming-iterator = "0.1.9"
 strength_reduce = "0.2"

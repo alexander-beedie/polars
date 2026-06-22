@@ -635,6 +635,11 @@ modifiers apply to every column.
     # │ x   ┆ 20  │
     # └─────┴─────┘
 
+.. note::
+
+    ``ORDER BY ALL`` is always interpreted as "order by all selected columns". To
+    order by a column literally named ``ALL``, quote it (e.g. ``ORDER BY "ALL"``).
+
 .. _offset:
 
 OFFSET
