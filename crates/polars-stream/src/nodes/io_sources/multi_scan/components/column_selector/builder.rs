@@ -344,14 +344,30 @@ impl ColumnSelectorBuilder {
 
                     (TimeUnit::Microseconds, TimeUnit::Milliseconds) => {
                         if !self.cast_columns_policy.datetime_microseconds_downcast {
-                            // TODO
                             return mismatch_err(
-                                "unimplemented: 'microsecond-downcast' in scan cast options",
+                                "hint: pass cast_options=pl.ScanCastOptions(datetime_cast='microsecond-downcast')",
                             );
                         }
                     },
 
-                    _ => return mismatch_err(""),
+                    (TimeUnit::Microseconds, TimeUnit::Nanoseconds) => {
+                        if !self.cast_columns_policy.datetime_microseconds_upcast {
+                            return mismatch_err(
+                                "hint: pass cast_options=pl.ScanCastOptions(datetime_cast='microsecond-upcast')",
+                            );
+                        }
+                    },
+
+                    (TimeUnit::Milliseconds, TimeUnit::Microseconds | TimeUnit::Nanoseconds) => {
+                        if !self.cast_columns_policy.datetime_milliseconds_upcast {
+                            return mismatch_err(
+                                "hint: pass cast_options=pl.ScanCastOptions(datetime_cast='millisecond-upcast')",
+                            );
+                        }
+                    },
+
+                    // All distinct-unit pairs are covered above.
+                    _ => unreachable!(),
                 };
             }
 
