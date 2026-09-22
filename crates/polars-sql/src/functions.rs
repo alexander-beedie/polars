@@ -976,8 +976,21 @@ impl PolarsSQLFunctions {
 
 impl PolarsSQLFunctions {
     fn try_from_sql(function: &'_ SQLFunction, ctx: &'_ SQLContext) -> PolarsResult<Self> {
+        if function.name.0.len() != 1 {
+            polars_bail!(SQLInterface: "qualified function names are not supported: '{}'", function.name)
+        }
         let function_name = function.name.0[0].as_ident().unwrap().value.to_lowercase();
-        Ok(match function_name.as_str() {
+        if let Some(function) = Self::from_name(function_name.as_str()) {
+            Ok(function)
+        } else if ctx.function_registry.contains(&function_name) {
+            Ok(Self::Udf(function_name))
+        } else {
+            polars_bail!(SQLInterface: "unsupported function '{}'", function_name)
+        }
+    }
+
+    fn from_name(function_name: &str) -> Option<Self> {
+        Some(match function_name {
             // ----
             // Bitwise functions
             // ----
@@ -1151,15 +1164,15 @@ impl PolarsSQLFunctions {
             // ----
             "columns" => Self::Columns,
 
-            other => {
-                if ctx.function_registry.contains(other) {
-                    Self::Udf(other.to_string())
-                } else {
-                    polars_bail!(SQLInterface: "unsupported function '{}'", other);
-                }
-            },
+            _ => return None,
         })
     }
+}
+
+/// Whether `name` identifies a built-in scalar, aggregate, window, or table function.
+pub(crate) fn is_builtin_function(name: &str) -> bool {
+    PolarsSQLFunctions::from_name(name).is_some()
+        || crate::table_functions::PolarsTableFunctions::keywords().contains(&name)
 }
 
 impl SQLFunctionVisitor<'_> {
@@ -1892,6 +1905,9 @@ impl SQLFunctionVisitor<'_> {
     }
 
     fn visit_udf(&mut self, func_name: &str) -> PolarsResult<Expr> {
+        if self.filter.is_some() {
+            polars_bail!(SQLInterface: "FILTER is not supported for user-defined functions")
+        }
         let args = extract_args(self.func)?
             .into_iter()
             .map(|arg| {
@@ -1906,9 +1922,8 @@ impl SQLFunctionVisitor<'_> {
         let expr = self
             .ctx
             .function_registry
-            .get_udf(func_name)?
-            .ok_or_else(|| polars_err!(SQLInterface: "UDF {} not found", func_name))?
-            .call(args);
+            .resolve_udf(func_name, args)?
+            .ok_or_else(|| polars_err!(SQLInterface: "UDF {} not found", func_name))?;
 
         self.apply_window_spec(expr, &self.func.over)
     }

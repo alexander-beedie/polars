@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 from typing import (
     TYPE_CHECKING,
     Generic,
@@ -29,6 +30,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
     from types import TracebackType
     from typing import Any, Final, Literal, TypeAlias
+
+    from polars.expr import Expr
 
     if sys.version_info >= (3, 11):
         from typing import Self
@@ -74,6 +77,43 @@ def _ensure_lazyframe(obj: Any) -> LazyFrame:
         return DataFrame(obj).lazy()  # type: ignore[union-attr]
     else:
         msg = f"unrecognised frame type: {qualified_type_name(obj)}"
+        raise ValueError(msg)
+
+
+def _validate_sql_function(function: Callable[..., Expr]) -> None:
+    """Reject callable forms that cannot be invoked with positional SQL arguments."""
+    call = (
+        None
+        if inspect.isroutine(function)
+        else inspect.getattr_static(type(function), "__call__", None)
+    )
+
+    unsupported = (
+        (inspect.iscoroutinefunction, "async functions"),
+        (inspect.isasyncgenfunction, "async generator functions"),
+        (inspect.isgeneratorfunction, "generator functions"),
+    )
+    for predicate, kind in unsupported:
+        if predicate(function) or (call is not None and predicate(call)):
+            msg = f"SQL expression builders cannot be {kind}"
+            raise ValueError(msg)
+
+    try:
+        signature = inspect.signature(function)
+    except (TypeError, ValueError):
+        return
+
+    names = ", ".join(
+        parameter.name
+        for parameter in signature.parameters.values()
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        and parameter.default is inspect.Parameter.empty
+    )
+    if names:
+        msg = (
+            "SQL expression builders cannot require keyword-only arguments "
+            f"(required: {names})"
+        )
         raise ValueError(msg)
 
 
@@ -469,6 +509,55 @@ class SQLContext(Generic[FrameType]):
         frame = LazyFrame() if frame is None else _ensure_lazyframe(frame)
         self._ctxt.register(name, frame._ldf)
         return self
+
+    def register_function(self, name: str, function: Callable[..., Expr]) -> Self:
+        """Register an expression-building callable as a SQL function.
+
+        The callable runs during query planning with one :class:`Expr` per SQL argument
+        and must return an :class:`Expr`. It should be pure and synchronous. Python
+        callbacks with configurable output types, including ``map_elements`` and
+        ``map_batches``, must specify ``return_dtype``; fixed-schema operations retain
+        their output type contract.
+
+        Names are case-insensitive and cannot conflict with built-ins, SQL parser
+        keywords, or registered functions. Registrations persist until removed with
+        :meth:`unregister_function`, including across context-manager scopes.
+
+        Parameters
+        ----------
+        name
+            Function name to use in SQL queries.
+        function
+            Expression-building callable. It cannot require keyword-only arguments.
+
+        Examples
+        --------
+        >>> df = pl.DataFrame({"value": [1, 2, 3]})
+        >>> ctx = pl.SQLContext(df=df)
+        >>> ctx.register_function("twice", lambda value: value * 2)
+        <SQLContext [tables:1] ...>
+        >>> ctx.execute("SELECT twice(value) AS value FROM df", eager=True)[
+        ...     "value"
+        ... ].to_list()
+        [2, 4, 6]
+
+        >>> def increment(value: pl.Expr) -> pl.Expr:
+        ...     return value.map_elements(lambda x: x + 1, return_dtype=pl.Int64)
+        >>> ctx.register_function("python_increment", increment)
+        <SQLContext [tables:1] ...>
+        """
+        _validate_sql_function(function)
+        self._ctxt.register_function(name, function)
+        return self
+
+    def unregister_function(self, name: str) -> Self:
+        """Unregister a Python SQL function by name."""
+        self._ctxt.unregister_function(name)
+        return self
+
+    def functions(self) -> list[str]:
+        """Return the registered Python SQL function names."""
+        return self._ctxt.get_functions()
 
     def register_globals(
         self, n: int | None = None, *, all_compatible: bool = True

@@ -225,9 +225,6 @@ pub(crate) enum FilterMode {
 pub struct SQLContext {
     pub(crate) table_map: Arc<RwLock<PlHashMap<String, LazyFrame>>>,
     pub(crate) function_registry: Arc<dyn FunctionRegistry>,
-    /// Set once a caller installs their own registry; user-defined functions cannot be
-    /// carried in the DSL, so such a context resolves its queries eagerly.
-    custom_function_registry: bool,
     pub(crate) lp_arena: Arena<IR>,
     pub(crate) expr_arena: Arena<AExpr>,
 
@@ -260,7 +257,6 @@ impl Default for SQLContext {
         crate::register_sql_resolver();
         Self {
             function_registry: Arc::new(DefaultFunctionRegistry {}),
-            custom_function_registry: false,
             table_map: Default::default(),
             cte_map: Default::default(),
             table_aliases: Default::default(),
@@ -343,16 +339,17 @@ impl SQLContext {
         }
 
         desugar_quantified_subqueries(&mut stmt);
-        let res = self.execute_statement(&stmt)?;
+        let res = self.execute_statement(&stmt);
 
         // Ensure the result uses the proper arenas.
         // This will instantiate new arenas with a new version.
         let lp_arena = std::mem::take(&mut self.lp_arena);
         let expr_arena = std::mem::take(&mut self.expr_arena);
-        res.set_cached_arena(lp_arena, expr_arena);
-
+        if let Ok(res) = &res {
+            res.set_cached_arena(lp_arena, expr_arena);
+        }
         self.clear_statement_state();
-        Ok(res)
+        res
     }
 
     /// Whether resolving `stmt` can be deferred to the DSL -> IR conversion.
@@ -360,7 +357,7 @@ impl SQLContext {
     /// Neither a registered relation nor a user-defined function survives the round trip
     /// through the DSL, so a statement that needs either runs eagerly.
     fn can_defer(&self, stmt: &Statement) -> bool {
-        !self.custom_function_registry
+        self.function_registry.is_empty()
             && is_read_only_query(stmt)
             && !statement_registers_table(stmt)
     }
@@ -429,7 +426,6 @@ impl SQLContext {
     /// The registry provides the ability to add custom functions to the SQLContext.
     pub fn with_function_registry(mut self, function_registry: Arc<dyn FunctionRegistry>) -> Self {
         self.function_registry = function_registry;
-        self.custom_function_registry = true;
         self
     }
 
@@ -440,7 +436,6 @@ impl SQLContext {
 
     /// Get a mutable reference to the function registry of the SQLContext
     pub fn registry_mut(&mut self) -> &mut dyn FunctionRegistry {
-        self.custom_function_registry = true;
         Arc::get_mut(&mut self.function_registry).unwrap()
     }
 }
@@ -456,7 +451,6 @@ impl SQLContext {
             // Context-level; needs to remain visible in nested scopes.
             // (Note: shared by Arc, no need to deep-copy)
             function_registry: self.function_registry.clone(),
-            custom_function_registry: self.custom_function_registry,
 
             ..Default::default()
         }

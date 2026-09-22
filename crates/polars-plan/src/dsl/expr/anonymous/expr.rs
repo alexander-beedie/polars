@@ -8,6 +8,8 @@ use polars_error::{PolarsResult, feature_gated, polars_bail};
 
 #[cfg(feature = "serde")]
 use super::serde_expr;
+#[cfg(feature = "python")]
+use crate::dsl::DataTypeExpr;
 use crate::dsl::LazySerde;
 
 pub trait AnonymousColumnsUdf: ColumnsUdf {
@@ -19,6 +21,12 @@ pub trait AnonymousColumnsUdf: ColumnsUdf {
     }
 
     fn get_field(&self, input_schema: &Schema, fields: &[Field]) -> PolarsResult<Field>;
+
+    /// The explicitly declared output type of a Python callback, when applicable.
+    #[cfg(feature = "python")]
+    fn python_output_type(&self) -> Option<Option<&DataTypeExpr>> {
+        None
+    }
 }
 
 /// A wrapper trait for any closure `Fn(Vec<Series>) -> PolarsResult<Series>`

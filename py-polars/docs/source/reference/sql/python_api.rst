@@ -187,11 +187,14 @@ Methods
 
     SQLContext.execute
     SQLContext.execute_global
+    SQLContext.functions
     SQLContext.register
+    SQLContext.register_function
     SQLContext.register_globals
     SQLContext.register_many
     SQLContext.tables
     SQLContext.unregister
+    SQLContext.unregister_function
 
 
 **Example:**

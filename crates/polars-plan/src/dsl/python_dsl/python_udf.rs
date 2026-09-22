@@ -6,9 +6,11 @@ use polars_core::error::*;
 use polars_core::frame::DataFrame;
 use polars_core::frame::column::Column;
 use polars_core::schema::Schema;
+use polars_core::series::Series;
 use polars_utils::pl_str::PlSmallStr;
 use pyo3::prelude::*;
 
+use crate::callback::PlanCallback;
 use crate::dsl::udf::try_infer_udf_output_dtype;
 use crate::prelude::*;
 
@@ -77,6 +79,158 @@ impl PythonUdfExpression {
 
         Ok(Arc::new(udf))
     }
+}
+
+/// Ensure configurable Python callbacks in an expression have declared output types.
+pub fn validate_python_udf_output_types(expr: &Expr) -> PolarsResult<()> {
+    for node in expr {
+        match node {
+            Expr::Cast { dtype, .. } => validate_dtype_expr(dtype)?,
+            Expr::DataTypeFunction(function) => validate_dtype_function(function)?,
+            Expr::Function { function, .. } => validate_function_expr(function)?,
+            Expr::AnonymousFunction {
+                input, function, ..
+            } => {
+                let materialized;
+                let function = match function {
+                    LazySerde::Deserialized(function) => function,
+                    _ => {
+                        materialized = function.clone().materialize()?;
+                        &materialized
+                    },
+                };
+                match function.python_output_type() {
+                    Some(None) => polars_bail!(
+                        InvalidOperation:
+                        "returned a Python UDF without return_dtype; set return_dtype explicitly"
+                    ),
+                    Some(Some(dtype)) => {
+                        polars_ensure!(
+                            !input.is_empty(),
+                            InvalidOperation:
+                            "returned a Python UDF without input expressions"
+                        );
+                        validate_dtype_expr(dtype)?;
+                    },
+                    None => {},
+                }
+            },
+            #[cfg(feature = "dynamic_group_by")]
+            Expr::Rolling { index_column, .. } => {
+                validate_python_udf_output_types(index_column)?;
+            },
+            Expr::SubPlan(_, _) => polars_bail!(
+                InvalidOperation:
+                "returned an expression containing a subplan, which is not supported"
+            ),
+            _ => {},
+        }
+    }
+    Ok(())
+}
+
+fn validate_dtype_expr(dtype: &DataTypeExpr) -> PolarsResult<()> {
+    use DataTypeExpr as D;
+    match dtype {
+        D::Literal(_) | D::SelfDtype => {},
+        D::OfExpr(expr) => validate_python_udf_output_types(expr)?,
+        D::InnerDataType { input, .. }
+        | D::Int(input, _)
+        | D::Struct(input, _)
+        | D::WrapInList(input)
+        | D::WrapInArray(input, _) => validate_dtype_expr(input)?,
+        D::StructWithFields(fields) => {
+            for (_, dtype) in fields {
+                validate_dtype_expr(dtype)?;
+            }
+        },
+    }
+    Ok(())
+}
+
+fn validate_dtype_function(function: &DataTypeFunction) -> PolarsResult<()> {
+    match function {
+        DataTypeFunction::Display(dtype)
+        | DataTypeFunction::Matches(dtype, _)
+        | DataTypeFunction::DefaultValue { dt_expr: dtype, .. }
+        | DataTypeFunction::Array(dtype, _)
+        | DataTypeFunction::Struct(dtype, _) => validate_dtype_expr(dtype),
+        DataTypeFunction::Eq(left, right) => {
+            validate_dtype_expr(left)?;
+            validate_dtype_expr(right)
+        },
+    }
+}
+
+fn validate_function_expr(function: &FunctionExpr) -> PolarsResult<()> {
+    let dtype = match function {
+        #[cfg(feature = "binary_encoding")]
+        FunctionExpr::BinaryExpr(BinaryFunction::Reinterpret(dtype, _)) => Some(dtype),
+        #[cfg(feature = "dtype-categorical")]
+        FunctionExpr::Categorical(CategoricalFunction::To(dtype, _)) => Some(dtype),
+        #[cfg(feature = "dtype-extension")]
+        FunctionExpr::Extension(ExtensionFunction::To(dtype)) => Some(dtype),
+        #[cfg(all(feature = "strings", feature = "extract_jsonpath"))]
+        FunctionExpr::StringExpr(StringFunction::JsonDecode(dtype)) => Some(dtype),
+        #[cfg(all(feature = "strings", feature = "temporal"))]
+        FunctionExpr::StringExpr(StringFunction::Strptime(dtype, _)) => Some(dtype),
+        #[cfg(feature = "range")]
+        FunctionExpr::Range(RangeFunction::IntRange { dtype, .. })
+        | FunctionExpr::Range(RangeFunction::IntRanges { dtype }) => Some(dtype),
+        FunctionExpr::FoldHorizontal {
+            callback,
+            return_dtype,
+            ..
+        }
+        | FunctionExpr::ReduceHorizontal {
+            callback,
+            return_dtype,
+            ..
+        } => {
+            ensure_python_callback_dtype(callback, return_dtype.as_ref())?;
+            return_dtype.as_ref()
+        },
+        #[cfg(feature = "dtype-struct")]
+        FunctionExpr::CumReduceHorizontal {
+            callback,
+            return_dtype,
+            ..
+        }
+        | FunctionExpr::CumFoldHorizontal {
+            callback,
+            return_dtype,
+            ..
+        } => {
+            ensure_python_callback_dtype(callback, return_dtype.as_ref())?;
+            return_dtype.as_ref()
+        },
+        #[cfg(feature = "replace")]
+        FunctionExpr::ReplaceStrict {
+            return_dtype: Some(dtype),
+        } => Some(dtype),
+        #[cfg(feature = "dtype-struct")]
+        FunctionExpr::RowDecode(fields, _) => {
+            for (_, dtype) in fields {
+                validate_dtype_expr(dtype)?;
+            }
+            None
+        },
+        _ => None,
+    };
+    dtype.map_or(Ok(()), validate_dtype_expr)
+}
+
+fn ensure_python_callback_dtype(
+    callback: &PlanCallback<(Series, Series), Series>,
+    dtype: Option<&DataTypeExpr>,
+) -> PolarsResult<()> {
+    if matches!(callback, PlanCallback::Python(_)) && dtype.is_none() {
+        polars_bail!(
+            InvalidOperation:
+            "returned a Python UDF without return_dtype; set return_dtype explicitly"
+        )
+    }
+    Ok(())
 }
 
 impl DataFrameUdf for polars_utils::python_function::PythonFunction {
@@ -189,6 +343,11 @@ impl AnonymousColumnsUdf for PythonUdfExpression {
             },
         };
         Ok(field)
+    }
+
+    #[cfg(feature = "python")]
+    fn python_output_type(&self) -> Option<Option<&DataTypeExpr>> {
+        Some(self.output_type.as_ref())
     }
 }
 
