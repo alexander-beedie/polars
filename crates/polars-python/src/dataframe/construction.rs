@@ -2,7 +2,7 @@ use polars::frame::row::{AnyValueBuffer, Row, rows_to_schema_supertypes, rows_to
 use polars::prelude::*;
 use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyMapping, PyString};
+use pyo3::types::{PyDict, PyFloat, PyMapping, PyString};
 
 use super::PyDataFrame;
 use crate::conversion::any_value::py_object_to_any_value;
@@ -118,7 +118,7 @@ impl PyDataFrame {
         for record in records {
             let record = Record::new(record?)?;
             for (i, buffer) in buffers.iter_mut().enumerate() {
-                push(buffer, read(&record, i)?, &record, i)?;
+                record.append_to(buffer, &keys[i], hints[i].as_ref(), strict)?;
             }
             height += 1;
         }
@@ -243,23 +243,67 @@ impl<'py> Record<'py> {
     }
 
     #[inline]
-    fn value(
-        &self,
-        key: &Bound<'py, PyString>,
-        dtype: Option<&DataType>,
-        strict: bool,
-    ) -> PyResult<AnyValue<'static>> {
-        let value = match self {
+    fn get_item(&self, key: &Bound<'py, PyString>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        Ok(match self {
             Self::Null => None,
             Self::Dict(dict) => dict.get_item(key)?,
             Self::Mapping(mapping) => match mapping.get_item(key) {
                 Err(err) if err.is_instance_of::<PyKeyError>(mapping.py()) => None,
                 value => Some(value?),
             },
-        };
-        match value {
+        })
+    }
+
+    #[inline]
+    fn value(
+        &self,
+        key: &Bound<'py, PyString>,
+        dtype: Option<&DataType>,
+        strict: bool,
+    ) -> PyResult<AnyValue<'static>> {
+        match self.get_item(key)? {
             Some(value) if !value.is_none() => py_object_to_any_value(&value, strict, true, dtype),
             _ => Ok(AnyValue::Null),
         }
+    }
+
+    #[inline]
+    fn append_to(
+        &self,
+        buffer: &mut AnyValueBuffer<'static>,
+        key: &Bound<'py, PyString>,
+        dtype: Option<&DataType>,
+        strict: bool,
+    ) -> PyResult<()> {
+        let value = match self.get_item(key)? {
+            Some(value) if !value.is_none() => {
+                // Append exact builtins without the conversion LUT or an owned AnyValue.
+                if matches!(self, Self::Dict(_)) {
+                    match &mut *buffer {
+                        AnyValueBuffer::String(builder) => {
+                            if let Ok(value) = value.cast_exact::<PyString>() {
+                                builder.append_value(value.to_str()?);
+                                return Ok(());
+                            }
+                        },
+                        AnyValueBuffer::Float64(builder) => {
+                            if let Ok(value) = value.cast_exact::<PyFloat>() {
+                                builder.append_value(value.value());
+                                return Ok(());
+                            }
+                        },
+                        _ => {},
+                    }
+                }
+                py_object_to_any_value(&value, strict, true, dtype)?
+            },
+            _ => AnyValue::Null,
+        };
+        if buffer.add(value).is_none() {
+            buffer
+                .add_fallible(&self.value(key, dtype, strict)?)
+                .map_err(PyPolarsErr::from)?;
+        }
+        Ok(())
     }
 }

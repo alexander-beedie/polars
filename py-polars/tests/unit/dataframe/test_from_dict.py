@@ -281,3 +281,103 @@ def test_from_dicts_rejected_value(
 ) -> None:
     with pytest.raises(ComputeError, match=f"could not append value: {value}"):
         pl.from_dicts(data, schema=schema, infer_schema_length=infer_schema_length)
+
+
+@pytest.mark.parametrize("schema_mode", ["infer", "schema", "overrides"])
+@pytest.mark.parametrize("strict", [True, False])
+def test_from_dicts_string_float_values(schema_mode: str, strict: bool) -> None:
+    class StringSubclass(str):
+        pass
+
+    class FloatSubclass(float):
+        pass
+
+    strings = ["", "a" * 12, "b" * 13, "c" * 24, "é漢🙂" * 100, "a\0b"]
+    numbers = [-0.0, 0.0, float("inf"), float("-inf"), float("nan"), 1.25]
+    data: list[Any] = [{"text": "prefix", "number": 0.5}]
+    data.extend({"number": n, "text": s} for s, n in zip(strings, numbers, strict=True))
+    data.extend(
+        [
+            {"text": StringSubclass("subclass"), "number": FloatSubclass(2.5)},
+            {"text": None, "number": None},
+            {},
+            None,
+            {"number": 3.5, "text": "last", "ignored": "extra"},
+        ]
+    )
+    schema = {"text": pl.String, "number": pl.Float64}
+    result = pl.from_dicts(
+        data,
+        schema=schema if schema_mode == "schema" else None,
+        schema_overrides=schema if schema_mode == "overrides" else None,
+        infer_schema_length=1,
+        strict=strict,
+    )
+    expected = pl.DataFrame(
+        {
+            "text": ["prefix", *strings, "subclass", None, None, None, "last"],
+            "number": [0.5, *numbers, 2.5, None, None, None, 3.5],
+        },
+        schema=schema,
+    )
+    assert_frame_equal(result, expected)
+    assert np.signbit(result["number"][1])
+
+
+@pytest.mark.parametrize("strict", [True, False])
+def test_from_dicts_string_float_dtype_fallback(strict: bool) -> None:
+    result = pl.from_dicts(
+        [{"text": "a", "number": 1.5}, {"text": "b", "number": 2}],
+        schema={"text": pl.Categorical, "number": pl.Float32},
+        strict=strict,
+    )
+    expected = pl.DataFrame(
+        {"text": ["a", "b"], "number": [1.5, 2.0]},
+        schema={"text": pl.Categorical, "number": pl.Float32},
+    )
+    assert_frame_equal(result, expected)
+
+
+def test_from_dicts_mapping_error_lookup_order() -> None:
+    calls: list[tuple[str, str]] = []
+
+    class TrackedMapping(UserDict[str, Any]):
+        def __getitem__(self, key: str) -> Any:
+            calls.append((self.data["text"], key))
+            return super().__getitem__(key)
+
+    data: list[Any] = [
+        {"text": "prefix", "number": 1.0},
+        TrackedMapping({"text": "valid", "number": 2.0}),
+        TrackedMapping({"text": "invalid", "number": []}),
+        TrackedMapping({"text": "unread", "number": 3.0}),
+    ]
+    with pytest.raises(ComputeError, match="could not append value"):
+        pl.from_dicts(data, schema={"text": pl.String, "number": pl.Float64})
+    assert calls == [
+        ("valid", "text"),
+        ("valid", "number"),
+        ("invalid", "text"),
+        ("invalid", "number"),
+        ("invalid", "number"),
+    ]
+
+
+@pytest.mark.parametrize("infer_schema_length", [1, None])
+def test_from_dicts_invalid_unicode(infer_schema_length: int | None) -> None:
+    with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
+        pl.from_dicts(
+            [{"text": "valid"}, {"text": "\ud800"}],
+            infer_schema_length=infer_schema_length,
+        )
+
+
+@pytest.mark.parametrize("strict", [True, False])
+def test_from_dicts_string_float_value_fallback(strict: bool) -> None:
+    result = pl.from_dicts(
+        [{"text": "first", "number": 1.5}, {"text": 42, "number": 2}],
+        infer_schema_length=1,
+        strict=strict,
+    )
+    expected = pl.DataFrame({"text": ["first", "42"], "number": [1.5, 2.0]})
+    assert_frame_equal(result, expected)
