@@ -38,16 +38,24 @@ impl DataFrame {
     /// Create a new [`DataFrame`] from rows.
     ///
     /// This should only be used when you have row wise data, as this is a lot slower
-    /// than creating the [`Series`] in a columnar fashion
-    pub fn from_rows_and_schema(rows: &[Row], schema: &Schema) -> PolarsResult<Self> {
-        Self::from_rows_iter_and_schema(rows.iter(), schema)
+    /// than creating the [`Series`] in a columnar fashion. If `strict`, a value of the
+    /// wrong kind for a nested column (e.g. a scalar for a struct) raises an error
+    /// instead of becoming null.
+    pub fn from_rows_and_schema(rows: &[Row], schema: &Schema, strict: bool) -> PolarsResult<Self> {
+        Self::from_rows_iter_and_schema(rows.iter(), schema, strict)
     }
 
     /// Create a new [`DataFrame`] from an iterator over rows.
     ///
     /// This should only be used when you have row wise data, as this is a lot slower
-    /// than creating the [`Series`] in a columnar fashion.
-    pub fn from_rows_iter_and_schema<'a, I>(mut rows: I, schema: &Schema) -> PolarsResult<Self>
+    /// than creating the [`Series`] in a columnar fashion. If `strict`, a value of the
+    /// wrong kind for a nested column (e.g. a scalar for a struct) raises an error
+    /// instead of becoming null.
+    pub fn from_rows_iter_and_schema<'a, I>(
+        mut rows: I,
+        schema: &Schema,
+        strict: bool,
+    ) -> PolarsResult<Self>
     where
         I: Iterator<Item = &'a Row<'a>>,
     {
@@ -67,7 +75,7 @@ impl DataFrame {
             check_row_width(row, &mut width, buffers.len(), expected_len)?;
             expected_len += 1;
             for (value, buf) in row.0.iter().zip(&mut buffers) {
-                buf.add_fallible(value)?
+                buf.add_fallible(value, strict)?
             }
             Ok(())
         })?;
@@ -114,7 +122,7 @@ impl DataFrame {
             check_row_width(row, &mut width, buffers.len(), expected_len)?;
             expected_len += 1;
             for (value, buf) in row.0.iter().zip(&mut buffers) {
-                buf.add_fallible(value)?
+                buf.add_fallible(value, false)?
             }
             Ok(())
         })?;
@@ -147,7 +155,7 @@ impl DataFrame {
         polars_ensure!(
             !has_nulls, ComputeError: "unable to infer row types because of null values"
         );
-        Self::from_rows_and_schema(rows, &schema)
+        Self::from_rows_and_schema(rows, &schema, false)
     }
 }
 

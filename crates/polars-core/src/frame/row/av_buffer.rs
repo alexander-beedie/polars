@@ -49,7 +49,7 @@ pub enum AnyValueBuffer<'a> {
 
 impl<'a> AnyValueBuffer<'a> {
     #[inline]
-    pub fn add(&mut self, val: AnyValue<'_>) -> Option<()> {
+    pub fn add(&mut self, val: AnyValue<'_>, strict: bool) -> Option<()> {
         use AnyValueBuffer::*;
         match (self, val) {
             (Boolean(builder), AnyValue::Null) => builder.append_null(),
@@ -133,7 +133,9 @@ impl<'a> AnyValueBuffer<'a> {
                 builder.append_value(val.extract()?)
             },
             (Null(builder), AnyValue::Null) => builder.append_null(),
-            // Struct and List can be recursive so use AnyValues for that
+            // Struct and List can be recursive so use AnyValues for that; if strict,
+            // reject values of the wrong kind (which would otherwise become null)
+            (All(dtype, _), v) if strict && !is_nested_kind(dtype, &v) => return None,
             (All(_, vals), v) => vals.push(v.into_static()),
 
             // dynamic types
@@ -154,8 +156,8 @@ impl<'a> AnyValueBuffer<'a> {
         Some(())
     }
 
-    pub fn add_fallible(&mut self, val: &AnyValue<'a>) -> PolarsResult<()> {
-        self.add(val.as_borrowed()).ok_or_else(|| {
+    pub fn add_fallible(&mut self, val: &AnyValue<'a>, strict: bool) -> PolarsResult<()> {
+        self.add(val.as_borrowed(), strict).ok_or_else(|| {
             polars_err!(
                 ComputeError: "could not append value: {} of type: {} to the builder; make sure that all rows \
                 have the same schema or consider increasing `infer_schema_length`\n\
@@ -286,6 +288,28 @@ impl<'a> AnyValueBuffer<'a> {
     }
 }
 
+/// Whether a value of nested `dtype` can be built from `av`, rather than becoming null.
+fn is_nested_kind(dtype: &DataType, av: &AnyValue) -> bool {
+    match dtype {
+        #[cfg(feature = "dtype-struct")]
+        DataType::Struct(fields) => match av {
+            AnyValue::Null | AnyValue::Struct(..) | AnyValue::StructOwned(_) => true,
+            AnyValue::List(s) => s.len() == fields.len(),
+            #[cfg(feature = "dtype-array")]
+            AnyValue::Array(s, _) => s.len() == fields.len(),
+            _ => false,
+        },
+        DataType::List(_) => matches!(av, AnyValue::Null | AnyValue::List(_)),
+        #[cfg(feature = "dtype-map")]
+        DataType::Map(..) => matches!(av, AnyValue::Null | AnyValue::Map(_) | AnyValue::List(_)),
+        #[cfg(feature = "dtype-array")]
+        DataType::Array(..) => {
+            matches!(av, AnyValue::Null | AnyValue::List(_) | AnyValue::Array(..))
+        },
+        _ => true,
+    }
+}
+
 // datatype and length
 impl From<(&DataType, usize)> for AnyValueBuffer<'_> {
     fn from(a: (&DataType, usize)) -> Self {
@@ -388,7 +412,7 @@ impl<'a> AnyValueBufferTrusted<'a> {
             Struct(outer_validity, builders) => {
                 outer_validity.push(false);
                 for (b, _) in builders.iter_mut() {
-                    b.add(AnyValue::Null);
+                    b.add(AnyValue::Null, false);
                 }
             },
             Null(builder) => builder.append_null(),
@@ -516,7 +540,7 @@ impl<'a> AnyValueBufferTrusted<'a> {
 
                         debug_assert_eq!(builders.len(), avs.len());
                         for ((builder, _), av) in builders.iter_mut().zip(avs.iter().cloned()) {
-                            builder.add(av);
+                            builder.add(av, false);
                         }
                         outer_validity.push(true);
                     },
@@ -559,7 +583,7 @@ impl<'a> AnyValueBufferTrusted<'a> {
                             // SAFETY: The values inside `val` need to be consistent, `idx` MUST be
                             // in-bounds for all `arr.values()` and `field.dtype` correct.
                             let av_new = unsafe { arr_to_any_value(&**array, idx, &field.dtype) };
-                            builder.add(av_new);
+                            builder.add(av_new, false);
                         }
                         outer_validity.push(true);
                     },

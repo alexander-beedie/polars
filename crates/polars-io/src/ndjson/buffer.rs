@@ -42,7 +42,7 @@ impl Buffer<'_> {
         use AnyValueBuffer::*;
         match &mut self.buf {
             _ if value.is_null() => {
-                self.buf.add(AnyValue::Null);
+                self.buf.add(AnyValue::Null, false);
                 Ok(())
             },
             Boolean(buf) => {
@@ -142,7 +142,9 @@ impl Buffer<'_> {
     }
 
     pub fn add_null(&mut self) {
-        self.buf.add(AnyValue::Null).expect("should not fail");
+        self.buf
+            .add(AnyValue::Null, false)
+            .expect("should not fail");
     }
 }
 pub(crate) fn init_buffers(

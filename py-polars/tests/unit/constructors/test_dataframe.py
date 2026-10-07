@@ -7,6 +7,7 @@ import sys
 from collections import OrderedDict
 from collections.abc import Mapping
 from datetime import date, datetime, time
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -17,7 +18,11 @@ from polars._utils.construction.dataframe import (
     _sequence_of_dataclasses_to_pydf,
     _sequence_to_pydf_dispatcher,
 )
-from polars.exceptions import DataOrientationWarning, InvalidOperationError
+from polars.exceptions import (
+    ComputeError,
+    DataOrientationWarning,
+    InvalidOperationError,
+)
 from polars.testing import assert_frame_equal
 
 if TYPE_CHECKING:
@@ -158,6 +163,67 @@ def test_df_init_nested_mixed_types() -> None:
     df = pl.DataFrame(data, strict=False)
     assert df.schema == {"key": pl.List(pl.Struct({"value": pl.Float64}))}
     assert df.to_dicts() == [{"key": [{"value": 1.0}, {"value": 1.0}]}]
+
+
+@pytest.mark.parametrize(
+    ("dtype", "value", "invalid"),
+    [
+        (pl.Struct({"a": pl.Int64}), {"a": 1}, 5),
+        (pl.Struct({"a": pl.Int64}), {"a": 1}, [1, 2]),
+        (pl.List(pl.Int64), [1], 5),
+        (pl.List(pl.Int64), [1], {"a": 1}),
+        (pl.Array(pl.Int64, 1), [1], "x"),
+        (pl.Map(pl.String, pl.Int64), {"a": 1}, 5),
+    ],
+)
+@pytest.mark.parametrize("as_dicts", [True, False])
+def test_df_init_rows_nested_strict(
+    dtype: pl.DataType, value: Any, invalid: Any, as_dicts: bool
+) -> None:
+    def init(strict: bool) -> pl.DataFrame:
+        if as_dicts:
+            data = [{"x": value}, {"x": invalid}]
+            return pl.from_dicts(data, schema={"x": dtype}, strict=strict)
+        rows = [(value,), (invalid,)]
+        return pl.DataFrame(rows, schema={"x": dtype}, orient="row", strict=strict)
+
+    with pytest.raises(ComputeError, match="could not append value"):
+        init(strict=True)
+
+    # non-strict, an invalid struct value is null or has all-null fields
+    first, second = init(strict=False).to_series().to_list()
+    assert first == value
+    assert second is None or all(v is None for v in second.values())
+
+
+@pytest.mark.parametrize(
+    ("dtype", "values", "expected"),
+    [
+        (None, [{"a": 1}, {"a": 2.5}], [{"a": 1.0}, {"a": 2.5}]),
+        (pl.Struct({"a": pl.Float64}), [{"a": 1}], [{"a": 1.0}]),
+        (pl.Struct({"a": pl.Float16}), [{"a": 1}], [{"a": 1.0}]),
+        (
+            pl.Struct({"a": pl.Datetime("ms")}),
+            [{"a": datetime(2020, 1, 1)}],
+            [{"a": datetime(2020, 1, 1)}],
+        ),
+        (pl.Struct({"a": pl.Int64, "b": pl.Int64}), [(1, 2)], [{"a": 1, "b": 2}]),
+        (pl.Decimal(10, 2), [1], [Decimal("1.00")]),
+        (None, [[1], [2.5]], [[1.0], [2.5]]),
+        (pl.Map(pl.String, pl.Float64), [{"a": 1}, None], [{"a": 1.0}, None]),
+    ],
+)
+@pytest.mark.parametrize("as_dicts", [True, False])
+def test_df_init_rows_nested_lenient_values(
+    dtype: pl.DataType | None, values: list[Any], expected: list[Any], as_dicts: bool
+) -> None:
+    # values of the right kind keep their lenient conversion under (default) strict
+    schema = {"x": dtype}
+    if as_dicts:
+        df = pl.from_dicts([{"x": v} for v in values], schema=schema)
+    else:
+        df = pl.DataFrame([(v,) for v in values], schema=schema, orient="row")
+    assert df.to_series().to_list() == expected
 
 
 class CustomSchema(Mapping[str, Any]):

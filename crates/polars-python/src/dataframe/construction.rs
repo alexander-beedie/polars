@@ -14,11 +14,12 @@ use crate::utils::EnterPolarsExt;
 #[pymethods]
 impl PyDataFrame {
     #[staticmethod]
-    #[pyo3(signature = (data, schema=None, infer_schema_length=None))]
+    #[pyo3(signature = (data, schema=None, strict=true, infer_schema_length=None))]
     pub fn from_rows(
         py: Python<'_>,
         data: Vec<Bound<PyAny>>,
         schema: Option<Wrap<Schema>>,
+        strict: bool,
         infer_schema_length: Option<usize>,
     ) -> PyResult<Self> {
         let schema = schema.map(|wrap| wrap.0);
@@ -36,7 +37,7 @@ impl PyDataFrame {
                 }
             })
             .collect::<PyResult<Vec<_>>>()?;
-        py.enter_polars(move || finish_from_rows(data, schema, infer_schema_length))
+        py.enter_polars(move || finish_from_rows(data, schema, strict, infer_schema_length))
     }
 
     #[staticmethod]
@@ -115,9 +116,9 @@ impl PyDataFrame {
             .map(|dtype| AnyValueBuffer::new(dtype, capacity))
             .collect();
         let push = |buffer: &mut AnyValueBuffer<'static>, value, record: &Record, i| {
-            if buffer.add(value).is_none() {
+            if buffer.add(value, strict).is_none() {
                 buffer
-                    .add_fallible(&read(record, i)?)
+                    .add_fallible(&read(record, i)?, strict)
                     .map_err(PyPolarsErr::from)?;
             }
             PyResult::Ok(())
@@ -173,6 +174,7 @@ fn read_row<'py>(
 fn finish_from_rows(
     rows: Vec<Row>,
     schema: Option<Schema>,
+    strict: bool,
     infer_schema_length: Option<usize>,
 ) -> PyResult<PyDataFrame> {
     let schema = if let Some(mut schema) = schema {
@@ -182,7 +184,7 @@ fn finish_from_rows(
         rows_to_schema_supertypes(&rows, infer_schema_length).map_err(PyPolarsErr::from)?
     };
 
-    let df = DataFrame::from_rows_and_schema(&rows, &schema).map_err(PyPolarsErr::from)?;
+    let df = DataFrame::from_rows_and_schema(&rows, &schema, strict).map_err(PyPolarsErr::from)?;
     Ok(df.into())
 }
 
