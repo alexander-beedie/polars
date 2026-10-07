@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import io
 import math
+from collections import deque
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from itertools import accumulate
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import pytest
 
@@ -523,6 +525,72 @@ def test_map_dtype_hint_at_every_depth_mapping_rows(
     # `mappings_to_rows` is a separate path from `dicts_to_rows`.
     df = pl.DataFrame([_CustomMapping({"c": value})], schema={"c": dtype})
     assert df["c"].to_list() == [value]
+
+
+@dataclass
+class _MapRecord:
+    c: Any
+    x: int
+
+
+class _MapRecordTuple(NamedTuple):
+    c: Any
+    x: int
+
+
+@pytest.mark.parametrize(("dtype", "value"), DEPTH_CASES)
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(
+            lambda dtype, value: pl.DataFrame(
+                [(value, 1)], schema={"c": dtype, "x": pl.Int64}, orient="row"
+            ),
+            id="tuple-schema",
+        ),
+        pytest.param(
+            lambda dtype, value: pl.DataFrame(
+                [(value, 1)],
+                schema=["c", "x"],
+                schema_overrides={"c": dtype},
+                orient="row",
+            ),
+            id="tuple-schema-overrides",
+        ),
+        pytest.param(
+            lambda dtype, value: pl.from_records(
+                [[value, 1]], schema={"c": dtype, "x": pl.Int64}, orient="row"
+            ),
+            id="list-from-records",
+        ),
+        pytest.param(
+            lambda dtype, value: pl.DataFrame(
+                [deque([value, 1])], schema={"c": dtype, "x": pl.Int64}, orient="row"
+            ),
+            id="deque",
+        ),
+        pytest.param(
+            lambda dtype, value: pl.DataFrame(
+                [_MapRecordTuple(value, 1)], schema_overrides={"c": dtype}
+            ),
+            id="namedtuple",
+        ),
+        pytest.param(
+            lambda dtype, value: pl.DataFrame(
+                [_MapRecord(value, 1)], schema_overrides={"c": dtype}
+            ),
+            id="dataclass",
+        ),
+    ],
+)
+def test_map_dtype_hint_at_every_depth_sequence_rows(
+    build: Callable[[pl.DataType, Any], pl.DataFrame], dtype: pl.DataType, value: Any
+) -> None:
+    # Sequence rows go through `PyDataFrame.from_rows`, not the dict-row path; it reads
+    # lists and tuples in place, and any other sequence (a deque here) through a `Vec`.
+    df = build(dtype, value)
+    assert df.schema == pl.Schema({"c": dtype, "x": pl.Int64()})
+    assert df.rows() == [(value, 1)]
 
 
 def test_map_lit_requires_explicit_dtype() -> None:

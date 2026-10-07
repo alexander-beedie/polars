@@ -2,11 +2,11 @@ use polars::frame::row::{AnyValueBuffer, Row, rows_to_schema_supertypes, rows_to
 use polars::prelude::*;
 use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyMapping, PyString};
+use pyo3::types::{PyDict, PyList, PyMapping, PyString, PyTuple};
 
 use super::PyDataFrame;
+use crate::conversion::Wrap;
 use crate::conversion::any_value::py_object_to_any_value;
-use crate::conversion::{Wrap, vec_extract_wrapped};
 use crate::error::PyPolarsErr;
 use crate::interop;
 use crate::utils::EnterPolarsExt;
@@ -17,12 +17,25 @@ impl PyDataFrame {
     #[pyo3(signature = (data, schema=None, infer_schema_length=None))]
     pub fn from_rows(
         py: Python<'_>,
-        data: Vec<Wrap<Row>>,
+        data: Vec<Bound<PyAny>>,
         schema: Option<Wrap<Schema>>,
         infer_schema_length: Option<usize>,
     ) -> PyResult<Self> {
-        let data = vec_extract_wrapped(data);
         let schema = schema.map(|wrap| wrap.0);
+        let dtypes: Vec<&DataType> = schema.iter().flat_map(Schema::iter_values).collect();
+        let data = data
+            .iter()
+            .map(|row| {
+                // lists and tuples are read in place, any other sequence through a `Vec`
+                if let Ok(tuple) = row.cast::<PyTuple>() {
+                    read_row(tuple.iter(), &dtypes)
+                } else if let Ok(list) = row.cast::<PyList>() {
+                    read_row(list.iter(), &dtypes)
+                } else {
+                    read_row(row.extract::<Vec<Bound<PyAny>>>()?.into_iter(), &dtypes)
+                }
+            })
+            .collect::<PyResult<Vec<_>>>()?;
         py.enter_polars(move || finish_from_rows(data, schema, infer_schema_length))
     }
 
@@ -142,6 +155,19 @@ impl PyDataFrame {
         let df = interop::arrow::to_rust::to_rust_df(py, &rb, schema)?;
         Ok(Self::from(df))
     }
+}
+
+/// Read a row's values with their column dtypes, as a dict can be a Struct or a Map.
+fn read_row<'py>(
+    values: impl ExactSizeIterator<Item = Bound<'py, PyAny>>,
+    dtypes: &[&DataType],
+) -> PyResult<Row<'static>> {
+    let mut row = Vec::with_capacity(values.len());
+    for (i, value) in values.enumerate() {
+        let dtype = dtypes.get(i).copied();
+        row.push(py_object_to_any_value(&value, true, true, dtype)?);
+    }
+    Ok(Row(row))
 }
 
 fn finish_from_rows(
