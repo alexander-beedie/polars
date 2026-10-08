@@ -593,6 +593,174 @@ def test_map_dtype_hint_at_every_depth_sequence_rows(
     assert df.rows() == [(value, 1)]
 
 
+MAP_PATHS = ["series", "dicts", "tuples"]
+
+
+def _map_column(
+    path: str, values: list[Any], dtype: PolarsDataType = MAP, *, strict: bool = True
+) -> pl.Series:
+    # The Map column of `pl.Series`, dict rows or tuple rows (around other columns).
+    if path == "series":
+        return pl.Series("m", values, dtype=dtype, strict=strict)
+    schema = {"a": pl.Int64, "m": dtype, "z": pl.String}
+    if path == "dicts":
+        dicts = [{"a": i, "m": v, "z": str(i)} for i, v in enumerate(values)]
+        df = pl.from_dicts(dicts, schema=schema, strict=strict)
+    else:
+        rows = [(i, v, str(i)) for i, v in enumerate(values)]
+        df = pl.DataFrame(rows, schema=schema, orient="row", strict=strict)
+    assert df.columns == ["a", "m", "z"]
+    assert df["a"].to_list() == list(range(len(values)))
+    return df["m"]
+
+
+@pytest.mark.parametrize("path", MAP_PATHS)
+def test_map_construction_of_every_row_form(path: str) -> None:
+    values = [
+        {"a": 1, "b": 2},
+        None,
+        {},
+        _CustomMapping({"c": 3}),
+        [{"key": "d", "value": 4}, {"key": "e", "value": 5}, {"key": "d", "value": 6}],
+        [],
+        {"f": None},
+    ]
+    expected = [{"a": 1, "b": 2}, None, {}, {"c": 3}, {"d": 6, "e": 5}, {}, {"f": None}]
+    s = _map_column(path, values)
+    assert s.dtype == MAP
+    assert s.to_list() == expected
+    # duplicate keys keep their first position
+    entries = s.cast(ENTRIES).to_list()
+    assert entries[4] == [{"key": "d", "value": 6}, {"key": "e", "value": 5}]
+
+
+@pytest.mark.parametrize("path", MAP_PATHS)
+def test_map_construction_of_nested_map_values(path: str) -> None:
+    dtype = pl.Map(pl.String, MAP)
+    values = [{"x": {"a": 1}, "y": {}}, None, {"z": None}]
+    assert _map_column(path, values, dtype).to_list() == values
+
+
+@pytest.mark.parametrize("path", MAP_PATHS)
+@pytest.mark.parametrize("invalid", [5, "x"])
+def test_map_construction_of_an_invalid_row(path: str, invalid: Any) -> None:
+    values = [{"a": 1}, invalid, {"b": 2}]
+    error = TypeError if path == "series" else ComputeError
+    with pytest.raises(error):
+        _map_column(path, values)
+    assert _map_column(path, values, strict=False).to_list() == [
+        {"a": 1},
+        None,
+        {"b": 2},
+    ]
+
+
+@pytest.mark.parametrize("path", MAP_PATHS)
+@pytest.mark.parametrize("strict", [True, False])
+def test_map_construction_rejects_a_null_key(path: str, strict: bool) -> None:
+    error = TypeError if path == "series" else InvalidOperationError
+    for null_key_row in ({None: 1}, [{"key": None, "value": 1}]):
+        with pytest.raises(error, match="Map keys cannot be null"):
+            _map_column(path, [{"a": 1}, null_key_row], strict=strict)
+
+
+@pytest.mark.parametrize("path", MAP_PATHS)
+@pytest.mark.parametrize(
+    ("dtype", "values", "expected"),
+    [
+        (
+            pl.Map(pl.String, pl.Datetime("us")),
+            [{"a": 1}, {"b": datetime(2020, 1, 1)}],
+            [{"a": datetime(1970, 1, 1, 0, 0, 0, 1)}, {"b": datetime(2020, 1, 1)}],
+        ),
+        (
+            pl.Map(pl.String, pl.Decimal(10, 2)),
+            [{"a": 1}, {"b": 1.25}, {"c": Decimal("1.5")}],
+            [{"a": Decimal("1.00")}, {"b": Decimal("1.25")}, {"c": Decimal("1.50")}],
+        ),
+    ],
+)
+def test_map_construction_of_rows_valid_each_but_not_alike(
+    path: str, dtype: pl.Map, values: list[Any], expected: list[Any]
+) -> None:
+    # Each row converts (strictly) on its own, though all values at once would not.
+    assert _map_column(path, values, dtype).to_list() == expected
+
+
+@pytest.mark.parametrize("path", MAP_PATHS)
+def test_map_construction_of_a_series_of_entries(path: str) -> None:
+    # Neither a mapping nor entries, but made a non-null Map row.
+    values = [pl.Series([{"key": "a", "value": 1}]), {"b": 2}]
+    assert _map_column(path, values).to_list() == [{"a": 1}, {"b": 2}]
+
+
+@pytest.mark.parametrize("other", [[{"key": "b", "value": 2}], [], 5])
+@pytest.mark.parametrize("as_dicts", [True, False])
+def test_map_construction_alongside_an_inferred_column(
+    other: Any, as_dicts: bool
+) -> None:
+    # Inferring the dtype of another column must not trip over the Map values.
+    values = [{"a": 1}, other]
+
+    def build(schema: Any, schema_overrides: Any = None) -> pl.DataFrame:
+        if as_dicts:
+            data = [{"x": i, "m": v} for i, v in enumerate(values)]
+            return pl.from_dicts(
+                data, schema=schema, schema_overrides=schema_overrides, strict=False
+            )
+        rows = list(enumerate(values))
+        return pl.DataFrame(
+            rows,
+            schema=schema or ["x", "m"],
+            schema_overrides=schema_overrides,
+            orient="row",
+            strict=False,
+        )
+
+    inferred = build(schema=None, schema_overrides={"m": MAP})
+    assert_frame_equal(inferred, build(schema={"x": pl.Int64, "m": MAP}))
+
+
+def test_map_construction_of_a_column_missing_from_the_rows() -> None:
+    @dataclass
+    class Row:
+        a: int
+
+    df = pl.DataFrame([Row(1), Row(2)], schema_overrides={"m": MAP})
+    assert df.schema == pl.Schema({"a": pl.Int64(), "m": MAP})
+    assert df["m"].to_list() == [None, None]
+
+
+@pytest.mark.parametrize("as_dicts", [True, False])
+def test_map_construction_in_a_struct_with_an_invalid_row(as_dicts: bool) -> None:
+    dtype = pl.Struct({"m": MAP})
+
+    def build(strict: bool) -> pl.Series:
+        if as_dicts:
+            df = pl.from_dicts(
+                [{"s": {"m": {"a": 1}}}, {"s": 5}], schema={"s": dtype}, strict=strict
+            )
+        else:
+            df = pl.DataFrame(
+                [({"m": {"a": 1}},), (5,)],
+                schema={"s": dtype},
+                orient="row",
+                strict=strict,
+            )
+        return df["s"]
+
+    with pytest.raises(ComputeError, match="could not append value"):
+        build(strict=True)
+    assert build(strict=False).to_list() == [{"m": {"a": 1}}, {"m": None}]
+
+
+@pytest.mark.parametrize("path", MAP_PATHS)
+def test_map_construction_in_an_array_with_a_leading_null(path: str) -> None:
+    dtype = pl.Array(MAP, 2)
+    values = [None, [{"a": 1}, {"b": 2}]]
+    assert _map_column(path, values, dtype).to_list() == values
+
+
 def test_map_lit_requires_explicit_dtype() -> None:
     # A dict infers as a Struct, so comparing a Map column to a bare `pl.lit(dict)`
     # is a dtype mismatch, exactly as for any other pair of unrelated dtypes.

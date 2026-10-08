@@ -16,13 +16,19 @@ use polars::prelude::{AnyValue, PlSmallStr, Series, TimeZone};
 use polars_compute::decimal::{DEC128_MAX_PREC, DecimalFmtBuffer, dec128_fits};
 use polars_core::prelude::try_unpack_map_entries;
 #[cfg(feature = "dtype-map")]
+use polars_core::prelude::{IntoSeries, MapChunked};
+#[cfg(feature = "dtype-map")]
 use polars_core::scalar::Scalar;
 use polars_core::utils::any_values_to_supertype_and_n_dtypes;
 #[cfg(feature = "dtype-map")]
 use polars_core::utils::polars_arrow::array::{MAP_KEY_NAME, MAP_VALUE_NAME};
+#[cfg(feature = "dtype-map")]
+use polars_core::utils::polars_arrow::bitmap::BitmapBuilder;
+#[cfg(feature = "dtype-map")]
+use polars_core::utils::polars_arrow::offset::Offsets;
 use polars_core::utils::polars_arrow::temporal_conversions::date32_to_date;
 use polars_utils::aliases::PlFixedStateQuality;
-use pyo3::exceptions::{PyOverflowError, PyTypeError, PyValueError};
+use pyo3::exceptions::{PyException, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
@@ -213,8 +219,84 @@ fn get_map(
     Ok(Scalar::new_map(&keys, &values).into_value())
 }
 
+/// Build a `Map` column from Python values, with one call to the Python constructor for all
+/// of its keys and one for all of its values (rather than two per row, as [`get_map`]).
+///
+/// `one_by_one` converts values one by one, as for any other column. A value that is not
+/// `None`, a mapping or Map entries is converted by it, and is a null row if it gives one.
+/// Otherwise, or if converting all keys or all values at once fails (e.g. for ints in one row
+/// and datetimes in another), it converts the whole column, so the results and errors are
+/// always those it gives.
 #[cfg(feature = "dtype-map")]
-fn py_series_of<'py>(
+pub(crate) fn py_values_to_map_series<'py>(
+    py: Python<'py>,
+    values: &[Bound<'py, PyAny>],
+    dtype: &DataType,
+    strict: bool,
+    one_by_one: impl Fn(&[Bound<'py, PyAny>]) -> PyResult<Series>,
+) -> PyResult<Series> {
+    let all_at_once = || -> PyResult<Option<Series>> {
+        let (key_dtype, value_dtype) = dtype.as_map().unwrap();
+        let mut keys = Vec::new();
+        let mut map_values = Vec::new();
+        let mut offsets = Offsets::<i64>::with_capacity(values.len());
+        let mut validity = BitmapBuilder::with_capacity(values.len());
+        for value in values {
+            let n_entries = keys.len();
+            let is_valid = if value.is_none() {
+                false
+            } else if let Ok(dict) = value.cast_exact::<PyDict>() {
+                for (key, value) in dict.iter() {
+                    keys.push(key);
+                    map_values.push(value);
+                }
+                true
+            } else if PyMapping::type_check(value) {
+                for item in value.cast::<PyMapping>()?.items()?.try_iter()? {
+                    let item = item?.cast_into::<PyTuple>()?;
+                    keys.push(item.get_item(0)?);
+                    map_values.push(item.get_item(1)?);
+                }
+                true
+            } else if is_map_entries(value)? {
+                for entry in value.try_iter()? {
+                    let entry = entry?.cast_into::<PyMapping>()?;
+                    keys.push(entry.get_item(MAP_KEY_NAME.as_str())?);
+                    map_values.push(entry.get_item(MAP_VALUE_NAME.as_str())?);
+                }
+                true
+            } else if one_by_one(std::slice::from_ref(value))?.null_count() == 1 {
+                false
+            } else {
+                return Ok(None);
+            };
+            offsets.try_push(keys.len() - n_entries).unwrap();
+            validity.push(is_valid);
+        }
+
+        // We must call the Python constructor in order to preserve the Python casting rules.
+        let keys = py_series_of(py, MAP_KEY_NAME, keys, key_dtype, strict)?;
+        let map_values = py_series_of(py, MAP_VALUE_NAME, map_values, value_dtype, strict)?;
+        let map = MapChunked::try_from_keys_and_values(
+            dtype.clone(),
+            &keys,
+            &map_values,
+            offsets.into(),
+            validity.into_opt_validity(),
+        )
+        .map_err(PyPolarsErr::from)?;
+        Ok(Some(map.into_series()))
+    };
+    match all_at_once() {
+        Ok(Some(s)) => Ok(s),
+        // not an `Exception`, e.g. a `KeyboardInterrupt`
+        Err(err) if !err.is_instance_of::<PyException>(py) => Err(err),
+        _ => one_by_one(values),
+    }
+}
+
+/// Call the Python `Series` constructor, as `pl.Series(name, values, dtype=dtype, strict=strict)`.
+pub(crate) fn py_series_of<'py>(
     py: Python<'py>,
     name: PlSmallStr,
     values: impl IntoPyObject<'py>,

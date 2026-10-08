@@ -9,10 +9,14 @@ use polars_arrow::types::NativeType;
 use polars_buffer::{Buffer, SharedStorage};
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
+#[cfg(feature = "dtype-map")]
+use pyo3::types::PyList;
 
 use crate::PySeries;
 use crate::conversion::Wrap;
 use crate::conversion::any_value::py_object_to_any_value;
+#[cfg(feature = "dtype-map")]
+use crate::conversion::any_value::py_values_to_map_series;
 use crate::error::PyPolarsErr;
 use crate::interop::arrow::to_rust::array_to_rust;
 use crate::prelude::ObjectValue;
@@ -282,14 +286,29 @@ impl PySeries {
         dtype: Wrap<DataType>,
         strict: bool,
     ) -> PyResult<Self> {
-        let avs = convert_to_avs(values, strict, false, Some(&dtype.0))?;
-        let s = Series::from_any_values_and_dtype(name.into(), avs.as_slice(), &dtype.0, strict)
-            .map_err(|e| {
-                PyTypeError::new_err(format!(
-                    "{e}\n\nHint: Try setting `strict=False` to allow passing data with mixed types."
-                ))
+        let dtype = dtype.0;
+        let from_any_values = |values: &Bound<PyAny>| {
+            let avs = convert_to_avs(values, strict, false, Some(&dtype))?;
+            Series::from_any_values_and_dtype(name.into(), avs.as_slice(), &dtype, strict).map_err(
+                |e| {
+                    PyTypeError::new_err(format!(
+                        "{e}\n\nHint: Try setting `strict=False` to allow passing data with mixed types."
+                    ))
+                },
+            )
+        };
+
+        #[cfg(feature = "dtype-map")]
+        if matches!(dtype, DataType::Map(..)) {
+            let py = values.py();
+            let values = values.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+            let s = py_values_to_map_series(py, &values, &dtype, strict, |values| {
+                from_any_values(PyList::new(py, values)?.as_any())
             })?;
-        Ok(s.into())
+            return Ok(s.with_name(name.into()).into());
+        }
+
+        Ok(from_any_values(values)?.into())
     }
 
     #[staticmethod]

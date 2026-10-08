@@ -1,12 +1,14 @@
 use polars::frame::row::{AnyValueBuffer, Row, rows_to_schema_supertypes, rows_to_supertypes};
 use polars::prelude::*;
-use pyo3::exceptions::PyKeyError;
+use pyo3::exceptions::{PyException, PyKeyError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyMapping, PyString, PyTuple};
 
 use super::PyDataFrame;
 use crate::conversion::Wrap;
-use crate::conversion::any_value::py_object_to_any_value;
+#[cfg(feature = "dtype-map")]
+use crate::conversion::any_value::py_values_to_map_series;
+use crate::conversion::any_value::{py_object_to_any_value, py_series_of};
 use crate::error::PyPolarsErr;
 use crate::interop;
 use crate::utils::EnterPolarsExt;
@@ -24,21 +26,36 @@ impl PyDataFrame {
     ) -> PyResult<Self> {
         let schema = schema.map(|wrap| wrap.0);
         let dtypes: Vec<&DataType> = schema.iter().flat_map(Schema::iter_values).collect();
+        let mut batched: Vec<Option<Vec<Bound<PyAny>>>> = dtypes
+            .iter()
+            .map(|dtype| is_batched(dtype).then(Vec::new))
+            .collect();
         let data = data
             .iter()
             .map(|row| {
                 // lists and tuples are read in place, any other sequence through a `Vec`
                 if let Ok(tuple) = row.cast::<PyTuple>() {
-                    read_row(tuple.iter(), &dtypes, strict)
+                    read_row(tuple.iter(), &dtypes, &mut batched, strict)
                 } else if let Ok(list) = row.cast::<PyList>() {
-                    read_row(list.iter(), &dtypes, strict)
+                    read_row(list.iter(), &dtypes, &mut batched, strict)
                 } else {
                     let values = row.extract::<Vec<Bound<PyAny>>>()?;
-                    read_row(values.into_iter(), &dtypes, strict)
+                    read_row(values.into_iter(), &dtypes, &mut batched, strict)
                 }
             })
             .collect::<PyResult<Vec<_>>>()?;
-        py.enter_polars(move || finish_from_rows(data, schema, strict, infer_schema_length))
+        let batched = batched
+            .into_iter()
+            .zip(&dtypes)
+            .map(|(cells, dtype)| {
+                cells
+                    .map(|cells| batched_column(py, &cells, dtype, strict))
+                    .transpose()
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        py.enter_polars(move || {
+            finish_from_rows(data, schema, batched, strict, infer_schema_length)
+        })
     }
 
     #[staticmethod]
@@ -95,15 +112,24 @@ impl PyDataFrame {
             .collect();
         let hints: Vec<Option<DataType>> = names.iter().map(|name| dtype_hint(name)).collect();
         let read = |record: &Record, i: usize| record.value(&keys[i], hints[i].as_ref(), strict);
-        let rows = leading
+        let mut batched: Vec<Option<Vec<Bound<PyAny>>>> = hints
             .iter()
-            .map(|record| {
-                (0..names.len())
-                    .map(|i| read(record, i))
-                    .collect::<PyResult<_>>()
-                    .map(Row)
-            })
-            .collect::<PyResult<Vec<_>>>()?;
+            .map(|dtype| dtype.as_ref().is_some_and(is_batched).then(Vec::new))
+            .collect();
+        let mut rows = Vec::with_capacity(leading.len());
+        for record in &leading {
+            let mut row = Vec::with_capacity(names.len());
+            for (i, cells) in batched.iter_mut().enumerate() {
+                row.push(match cells {
+                    Some(cells) => {
+                        cells.push(record.cell(&keys[i])?);
+                        AnyValue::Null
+                    },
+                    None => read(record, i)?,
+                });
+            }
+            rows.push(Row(row));
+        }
 
         let mut schema = schema
             .unwrap_or_else(|| columns_names_to_empty_schema(names.iter().map(String::as_str)));
@@ -130,22 +156,43 @@ impl PyDataFrame {
         let mut height = leading.len();
         for (record, row) in leading.iter().zip(rows) {
             for (i, (buffer, value)) in buffers.iter_mut().zip(row.0).enumerate() {
-                push(buffer, value, record, i)?;
+                if batched[i].is_none() {
+                    push(buffer, value, record, i)?;
+                }
             }
         }
         for record in records {
             let record = Record::new(record?)?;
-            for (i, buffer) in buffers.iter_mut().enumerate() {
-                push(buffer, read(&record, i)?, &record, i)?;
+            for (i, (buffer, cells)) in buffers.iter_mut().zip(&mut batched).enumerate() {
+                match cells {
+                    Some(cells) => cells.push(record.cell(&keys[i])?),
+                    None => push(buffer, read(&record, i)?, &record, i)?,
+                }
             }
             height += 1;
         }
+        let batched = batched
+            .into_iter()
+            .zip(schema.iter_values())
+            .map(|(cells, dtype)| {
+                cells
+                    .map(|cells| batched_column(py, &cells, dtype, strict))
+                    .transpose()
+            })
+            .collect::<PyResult<Vec<_>>>()?;
 
         py.enter_polars_df(move || {
             let columns = buffers
                 .into_iter()
+                .zip(batched)
                 .zip(schema.iter_names())
-                .map(|(buffer, name)| Ok(buffer.into_series()?.with_name(name.clone()).into()))
+                .map(|((buffer, batched), name)| {
+                    let s = match batched {
+                        Some(s) => s,
+                        None => buffer.into_series()?,
+                    };
+                    Ok(s.with_name(name.clone()).into())
+                })
                 .collect::<PolarsResult<Vec<_>>>()?;
             DataFrame::new(height, columns)
         })
@@ -163,22 +210,82 @@ impl PyDataFrame {
 }
 
 /// Read a row's values with their column dtypes, as a dict can be a Struct or a Map.
+///
+/// The values of a `batched` column are kept instead, with a null in the row.
 fn read_row<'py>(
     values: impl ExactSizeIterator<Item = Bound<'py, PyAny>>,
     dtypes: &[&DataType],
+    batched: &mut [Option<Vec<Bound<'py, PyAny>>>],
     strict: bool,
 ) -> PyResult<Row<'static>> {
     let mut row = Vec::with_capacity(values.len());
     for (i, value) in values.enumerate() {
-        let dtype = dtypes.get(i).copied();
-        row.push(py_object_to_any_value(&value, strict, true, dtype)?);
+        row.push(match batched.get_mut(i) {
+            Some(Some(cells)) => {
+                cells.push(value);
+                AnyValue::Null
+            },
+            _ => py_object_to_any_value(&value, strict, true, dtypes.get(i).copied())?,
+        });
     }
     Ok(Row(row))
+}
+
+/// Whether the values of a column of this dtype are converted all at once, at the end: a
+/// Map converts its keys and values with the Python constructor, which is slow to call for
+/// every value.
+fn is_batched(dtype: &DataType) -> bool {
+    dtype.is_known() && dtype.contains_map()
+}
+
+/// Convert the values of a batched column all at once or, if that fails, one by one through
+/// the row buffers, which then give the result (or error).
+fn batched_column(
+    py: Python<'_>,
+    cells: &[Bound<'_, PyAny>],
+    dtype: &DataType,
+    strict: bool,
+) -> PyResult<Series> {
+    let one_by_one = |cells: &[Bound<'_, PyAny>]| -> PyResult<Series> {
+        let mut buffer = AnyValueBuffer::new(dtype, cells.len());
+        for cell in cells {
+            let value = if cell.is_none() {
+                AnyValue::Null
+            } else {
+                py_object_to_any_value(cell, strict, true, Some(dtype))?
+            };
+            if strict {
+                buffer
+                    .add_fallible(&value, true)
+                    .map_err(PyPolarsErr::from)?;
+            } else {
+                buffer.add_or_null(value);
+            }
+        }
+        Ok(buffer.into_series().map_err(PyPolarsErr::from)?)
+    };
+    match dtype {
+        #[cfg(feature = "dtype-map")]
+        DataType::Map(..) => py_values_to_map_series(py, cells, dtype, strict, one_by_one),
+        _ => match py_series_of(
+            py,
+            PlSmallStr::EMPTY,
+            PyList::new(py, cells)?,
+            dtype,
+            strict,
+        ) {
+            // not an `Exception`, e.g. a `KeyboardInterrupt`
+            Err(err) if !err.is_instance_of::<PyException>(py) => Err(err),
+            Err(_) => one_by_one(cells),
+            s => s,
+        },
+    }
 }
 
 fn finish_from_rows(
     rows: Vec<Row>,
     schema: Option<Schema>,
+    batched: Vec<Option<Series>>,
     strict: bool,
     infer_schema_length: Option<usize>,
 ) -> PyResult<PyDataFrame> {
@@ -189,7 +296,26 @@ fn finish_from_rows(
         rows_to_schema_supertypes(&rows, infer_schema_length).map_err(PyPolarsErr::from)?
     };
 
-    let df = DataFrame::from_rows_and_schema(&rows, &schema, strict).map_err(PyPolarsErr::from)?;
+    // the rows hold nulls in place of the batched columns
+    let mut rows_schema = schema.clone();
+    for (dtype, s) in rows_schema.iter_values_mut().zip(&batched) {
+        if s.is_some() {
+            *dtype = DataType::Null;
+        }
+    }
+    let mut df =
+        DataFrame::from_rows_and_schema(&rows, &rows_schema, strict).map_err(PyPolarsErr::from)?;
+    for (i, (s, dtype)) in batched.into_iter().zip(schema.iter_values()).enumerate() {
+        let Some(s) = s else { continue };
+        let name = df.columns()[i].name().clone();
+        // rows narrower than the schema have no values for its last columns
+        let s = if s.is_empty() {
+            Series::full_null(name, df.height(), dtype)
+        } else {
+            s.with_name(name)
+        };
+        df.replace_column(i, s.into()).map_err(PyPolarsErr::from)?;
+    }
     Ok(df.into())
 }
 
@@ -276,23 +402,34 @@ impl<'py> Record<'py> {
     }
 
     #[inline]
-    fn value(
-        &self,
-        key: &Bound<'py, PyString>,
-        dtype: Option<&DataType>,
-        strict: bool,
-    ) -> PyResult<AnyValue<'static>> {
-        let value = match self {
+    fn get(&self, key: &Bound<'py, PyString>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        Ok(match self {
             Self::Null => None,
             Self::Dict(dict) => dict.get_item(key)?,
             Self::Mapping(mapping) => match mapping.get_item(key) {
                 Err(err) if err.is_instance_of::<PyKeyError>(mapping.py()) => None,
                 value => Some(value?),
             },
-        };
-        match value {
+        })
+    }
+
+    #[inline]
+    fn value(
+        &self,
+        key: &Bound<'py, PyString>,
+        dtype: Option<&DataType>,
+        strict: bool,
+    ) -> PyResult<AnyValue<'static>> {
+        match self.get(key)? {
             Some(value) if !value.is_none() => py_object_to_any_value(&value, strict, true, dtype),
             _ => Ok(AnyValue::Null),
         }
+    }
+
+    /// The value at `key` as a Python object, `None` if missing.
+    fn cell(&self, key: &Bound<'py, PyString>) -> PyResult<Bound<'py, PyAny>> {
+        Ok(self
+            .get(key)?
+            .unwrap_or_else(|| key.py().None().into_bound(key.py())))
     }
 }

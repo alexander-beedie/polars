@@ -75,6 +75,36 @@ impl MapChunked {
         Ok(Self { dtype, storage })
     }
 
+    /// Build a Map from the flat keys and values of its entries, where row `i` owns the
+    /// entries in `offsets[i]..offsets[i + 1]`, validating as [`Self::try_from_storage`].
+    ///
+    /// # Panics
+    /// If `keys` and `values` differ in length, or `offsets` or `validity` do not fit them.
+    pub fn try_from_keys_and_values(
+        dtype: DataType,
+        keys: &Series,
+        values: &Series,
+        offsets: OffsetsBuffer<i64>,
+        validity: Option<Bitmap>,
+    ) -> PolarsResult<Self> {
+        let entries = pack_map_entries(keys, values).rechunk();
+        let arr = LargeListArray::new(
+            LargeListArray::default_datatype(entries.chunks()[0].dtype().clone()),
+            offsets,
+            entries.chunks()[0].clone(),
+            validity,
+        );
+        // SAFETY: the list holds the single chunk of `entries`, so has its dtype as inner dtype.
+        let storage = unsafe {
+            Series::from_chunks_and_dtype_unchecked(
+                PlSmallStr::EMPTY,
+                vec![arr.boxed()],
+                &DataType::List(Box::new(entries.dtype().clone())),
+            )
+        };
+        Self::try_from_storage(dtype, storage)
+    }
+
     pub fn name(&self) -> &PlSmallStr {
         self.storage.name()
     }
