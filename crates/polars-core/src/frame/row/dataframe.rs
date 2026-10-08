@@ -39,8 +39,8 @@ impl DataFrame {
     ///
     /// This should only be used when you have row wise data, as this is a lot slower
     /// than creating the [`Series`] in a columnar fashion. If `strict`, a value that does
-    /// not fit its column (including one of the wrong kind for a nested column, e.g. a
-    /// scalar for a struct) raises an error; otherwise it becomes null.
+    /// not fit its column exactly (e.g. "x" or 1.5 for an integer column, or a scalar
+    /// for a struct) raises an error; otherwise it is cast, or else becomes null.
     pub fn from_rows_and_schema(rows: &[Row], schema: &Schema, strict: bool) -> PolarsResult<Self> {
         Self::from_rows_iter_and_schema(rows.iter(), schema, strict)
     }
@@ -49,8 +49,8 @@ impl DataFrame {
     ///
     /// This should only be used when you have row wise data, as this is a lot slower
     /// than creating the [`Series`] in a columnar fashion. If `strict`, a value that does
-    /// not fit its column (including one of the wrong kind for a nested column, e.g. a
-    /// scalar for a struct) raises an error; otherwise it becomes null.
+    /// not fit its column exactly (e.g. "x" or 1.5 for an integer column, or a scalar
+    /// for a struct) raises an error; otherwise it is cast, or else becomes null.
     pub fn from_rows_iter_and_schema<'a, I>(
         mut rows: I,
         schema: &Schema,

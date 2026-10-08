@@ -221,6 +221,7 @@ def sequence_to_pyseries(
         return plc.sequence_to_pydf(
             data=data,
             schema=struct_schema,
+            strict=strict,
             orient="row",
         ).to_struct(name, invalid)
 

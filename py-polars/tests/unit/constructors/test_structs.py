@@ -1,4 +1,7 @@
+import pytest
+
 import polars as pl
+from polars.exceptions import ComputeError
 
 
 def test_constructor_non_strict_schema_17956() -> None:
@@ -147,3 +150,12 @@ def test_constructor_non_strict_schema_17956() -> None:
             }
         ]
     }
+
+
+def test_series_init_struct_strict() -> None:
+    dtype = pl.Struct({"a": pl.Int64})
+    with pytest.raises(ComputeError, match="could not append value"):
+        pl.Series([{"a": 1.5}], dtype=dtype)
+
+    s = pl.Series([{"a": 1.5}, {"a": "x"}, None], dtype=dtype, strict=False)
+    assert s.to_list() == [{"a": 1}, {"a": None}, None]

@@ -51,12 +51,15 @@ impl<'a> AnyValueBuffer<'a> {
     #[inline]
     pub fn add(&mut self, val: AnyValue<'_>, strict: bool) -> Option<()> {
         use AnyValueBuffer::*;
+        if strict && !is_lossless(self, &val) {
+            return None;
+        }
         match (self, val) {
             (Boolean(builder), AnyValue::Null) => builder.append_null(),
             (Boolean(builder), AnyValue::Boolean(v)) => builder.append_value(v),
-            (Boolean(builder), val) => {
-                let v = val.extract::<u8>()?;
-                builder.append_value(v == 1)
+            // as when cast, a number is true if nonzero (other values cannot be cast)
+            (Boolean(builder), val) if val.dtype().is_numeric() => {
+                builder.append_value(val.extract::<f64>()? != 0.0)
             },
             (Int32(builder), AnyValue::Null) => builder.append_null(),
             (Int32(builder), val) => builder.append_value(val.extract()?),
@@ -315,6 +318,48 @@ fn is_nested_kind(dtype: &DataType, av: &AnyValue) -> bool {
             matches!(av, AnyValue::Null | AnyValue::List(_) | AnyValue::Array(..))
         },
         _ => true,
+    }
+}
+
+/// Whether `av` can be added to a flat `buffer` without losing information, e.g. by
+/// truncating 1.5 to an integer (values that cannot be converted fail to be added regardless).
+fn is_lossless(buffer: &AnyValueBuffer, av: &AnyValue) -> bool {
+    use AnyValueBuffer::*;
+    match buffer {
+        Boolean(_) => match av {
+            AnyValue::Null | AnyValue::Boolean(_) => true,
+            av => av.extract::<f64>().is_some_and(|v| v == 0.0 || v == 1.0),
+        },
+        Int32(_) | Int64(_) | UInt32(_) | UInt64(_) => is_integral(av),
+        #[cfg(feature = "dtype-i8")]
+        Int8(_) => is_integral(av),
+        #[cfg(feature = "dtype-i16")]
+        Int16(_) => is_integral(av),
+        #[cfg(feature = "dtype-u8")]
+        UInt8(_) => is_integral(av),
+        #[cfg(feature = "dtype-u16")]
+        UInt16(_) => is_integral(av),
+        #[cfg(feature = "dtype-date")]
+        Date(_) => is_integral(av),
+        #[cfg(feature = "dtype-datetime")]
+        Datetime(..) => is_integral(av),
+        #[cfg(feature = "dtype-duration")]
+        Duration(..) => is_integral(av),
+        #[cfg(feature = "dtype-time")]
+        Time(_) => is_integral(av),
+        // floats narrow to the nearest value, and strings are formatted exactly
+        Float32(_) | Float64(_) | String(_) | Null(_) | All(..) => true,
+    }
+}
+
+/// Whether `av` has no fractional part that converting it to an integer would drop.
+fn is_integral(av: &AnyValue) -> bool {
+    match av {
+        AnyValue::String(s) => s.parse::<i128>().is_ok(),
+        AnyValue::StringOwned(s) => s.parse::<i128>().is_ok(),
+        #[cfg(feature = "dtype-decimal")]
+        AnyValue::Decimal(v, _, scale) => v % 10_i128.pow(*scale as u32) == 0,
+        av => !av.is_float() || av.extract::<f64>().is_some_and(|v| v.fract() == 0.0),
     }
 }
 

@@ -6,7 +6,7 @@ import subprocess
 import sys
 from collections import OrderedDict
 from collections.abc import Mapping
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
@@ -23,7 +23,7 @@ from polars.exceptions import (
     DataOrientationWarning,
     InvalidOperationError,
 )
-from polars.testing import assert_frame_equal
+from polars.testing import assert_frame_equal, assert_series_equal
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -229,6 +229,120 @@ def test_df_init_rows_non_strict(
 
     # non-strict, an invalid value is cast or else null
     assert init(strict=False).to_series().to_list() == [value, non_strict]
+
+
+@pytest.mark.parametrize(
+    ("dtype", "lossy", "cast"),
+    [
+        (pl.Int64, 1.5, 1),
+        (pl.Int32, -2.5, -2),
+        (pl.UInt8, 2.5, 2),
+        (pl.Int64, "1.5", 1),
+        (pl.Int64, Decimal("1.5"), 2),
+        (pl.Boolean, 2, True),
+        (pl.Boolean, 0.5, True),
+        (pl.Boolean, "1", None),
+        (pl.Boolean, date(1970, 1, 2), None),
+        (pl.Date, 1.5, date(1970, 1, 2)),
+        (pl.Datetime("us"), 1.5, datetime(1970, 1, 1, 0, 0, 0, 1)),
+        (pl.Duration("us"), 1.5, timedelta(microseconds=1)),
+        (pl.Time, 1000.5, time(0, 0, 0, 1)),
+    ],
+)
+@pytest.mark.parametrize("as_dicts", [True, False])
+def test_df_init_rows_strict_lossy(
+    dtype: pl.DataType, lossy: Any, cast: Any, as_dicts: bool
+) -> None:
+    def init(strict: bool) -> pl.DataFrame:
+        if as_dicts:
+            return pl.from_dicts([{"x": lossy}], schema={"x": dtype}, strict=strict)
+        rows = [(lossy,)]
+        return pl.DataFrame(rows, schema={"x": dtype}, orient="row", strict=strict)
+
+    # a value that would lose information raises...
+    with pytest.raises(ComputeError, match="could not append value"):
+        init(strict=True)
+
+    # ...and is cast (or else null) if not strict
+    assert init(strict=False).to_series().to_list() == [cast]
+
+
+@pytest.mark.parametrize(
+    ("dtype", "value", "expected"),
+    [
+        (pl.Int32, 2.0, 2),
+        (pl.Int64, True, 1),
+        (pl.Int64, Decimal("2.00"), 2),
+        (pl.Int64, "-5", -5),
+        (pl.UInt64, str(2**64 - 1), 2**64 - 1),
+        (pl.Int64, date(1970, 1, 3), 2),
+        (pl.Float64, 1, 1.0),
+        (pl.Float64, True, 1.0),
+        (pl.Float64, Decimal("1.5"), 1.5),
+        (pl.Float32, "-5.0", -5.0),
+        (pl.Float32, 0.1, 0.10000000149011612),
+        (pl.Boolean, 1, True),
+        (pl.Boolean, 0.0, False),
+        (pl.String, 1, "1"),
+        (pl.String, 1.5, "1.5"),
+        (pl.String, True, "true"),
+        (pl.Date, 2.0, date(1970, 1, 3)),
+        (pl.Datetime("ns"), datetime(2020, 1, 1, 12), datetime(2020, 1, 1, 12)),
+        (pl.Duration("ms"), timedelta(days=1), timedelta(days=1)),
+        (pl.Time, time(1, 2, 3), time(1, 2, 3)),
+    ],
+)
+@pytest.mark.parametrize("as_dicts", [True, False])
+def test_df_init_rows_strict_exact(
+    dtype: pl.DataType, value: Any, expected: Any, as_dicts: bool
+) -> None:
+    # a value that converts exactly is accepted
+    if as_dicts:
+        df = pl.from_dicts([{"x": value}, {"x": None}], schema={"x": dtype})
+    else:
+        df = pl.DataFrame([(value,), (None,)], schema={"x": dtype}, orient="row")
+    assert df.schema == {"x": dtype}
+    assert df.to_series().to_list() == [expected, None]
+
+
+@pytest.mark.parametrize("as_dicts", [True, False])
+def test_df_init_rows_strict_inferred(as_dicts: bool) -> None:
+    def init(values: list[Any], **kwargs: Any) -> pl.Series:
+        if as_dicts:
+            return pl.DataFrame([{"x": v} for v in values], **kwargs).to_series()
+        rows = [(v,) for v in values]
+        return pl.DataFrame(rows, orient="row", **kwargs).to_series()
+
+    # values are cast to the inferred supertype
+    assert init([1, 2.5]).to_list() == [1.0, 2.5]
+    assert init([True, 1]).to_list() == [1, 1]
+    assert init([1, "a"]).to_list() == ["1", "a"]
+
+    # past `infer_schema_length`, a lossy value raises (unless not strict)
+    assert init([1, 2.0], infer_schema_length=1).to_list() == [1, 2]
+    with pytest.raises(ComputeError, match="infer_schema_length"):
+        init([1, 2.5], infer_schema_length=1)
+    assert init([1, 2.5], infer_schema_length=1, strict=False).to_list() == [1, 2]
+
+
+@pytest.mark.parametrize("as_dicts", [True, False])
+def test_df_init_rows_non_strict_boolean(as_dicts: bool) -> None:
+    def init(values: list[Any]) -> pl.Series:
+        schema = {"x": pl.Boolean}
+        if as_dicts:
+            data = [{"x": v} for v in values]
+            return pl.from_dicts(data, schema=schema, strict=False).to_series()
+        rows = [(v,) for v in values]
+        return pl.DataFrame(rows, schema=schema, orient="row", strict=False).to_series()
+
+    # as with a cast, any nonzero number is true...
+    values = [0, 1, 2, 42, -1, 0.5]
+    expected = pl.Series("x", values, strict=False).cast(pl.Boolean)
+    assert_series_equal(init(values), expected)
+
+    # ...and a string or temporal value cannot be cast, so it is null
+    uncastable = ["1", "0", "-5", date(1970, 1, 2), timedelta(1)]
+    assert init(uncastable).to_list() == [None] * len(uncastable)
 
 
 @pytest.mark.parametrize(
