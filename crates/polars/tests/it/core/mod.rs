@@ -5,6 +5,7 @@ mod list;
 mod ops;
 #[cfg(feature = "rolling_window")]
 mod rolling_window;
+mod rows;
 mod series;
 mod utils;
 

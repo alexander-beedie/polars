@@ -167,6 +167,14 @@ impl<'a> AnyValueBuffer<'a> {
         })
     }
 
+    /// Add `val`, or a null if it cannot be converted.
+    #[inline]
+    pub fn add_or_null(&mut self, val: AnyValue<'_>) {
+        if self.add(val, false).is_none() {
+            self.add(AnyValue::Null, false);
+        }
+    }
+
     pub fn reset(&mut self, capacity: usize, strict: bool) -> PolarsResult<Series> {
         use AnyValueBuffer::*;
         let out = match self {

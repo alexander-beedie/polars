@@ -29,11 +29,12 @@ impl PyDataFrame {
             .map(|row| {
                 // lists and tuples are read in place, any other sequence through a `Vec`
                 if let Ok(tuple) = row.cast::<PyTuple>() {
-                    read_row(tuple.iter(), &dtypes)
+                    read_row(tuple.iter(), &dtypes, strict)
                 } else if let Ok(list) = row.cast::<PyList>() {
-                    read_row(list.iter(), &dtypes)
+                    read_row(list.iter(), &dtypes, strict)
                 } else {
-                    read_row(row.extract::<Vec<Bound<PyAny>>>()?.into_iter(), &dtypes)
+                    let values = row.extract::<Vec<Bound<PyAny>>>()?;
+                    read_row(values.into_iter(), &dtypes, strict)
                 }
             })
             .collect::<PyResult<Vec<_>>>()?;
@@ -109,16 +110,19 @@ impl PyDataFrame {
         resolve_schema_overrides(&mut schema, schema_overrides);
         update_schema_from_rows(&mut schema, &rows, infer_schema_length)?;
 
-        // values move into the buffers; a rejected value is read again, for the error
+        // values move into the buffers; if strict, a rejected value is read again, for
+        // the error, otherwise it becomes null
         let capacity = data.len()?;
         let mut buffers: Vec<AnyValueBuffer> = schema
             .iter_values()
             .map(|dtype| AnyValueBuffer::new(dtype, capacity))
             .collect();
         let push = |buffer: &mut AnyValueBuffer<'static>, value, record: &Record, i| {
-            if buffer.add(value, strict).is_none() {
+            if !strict {
+                buffer.add_or_null(value);
+            } else if buffer.add(value, true).is_none() {
                 buffer
-                    .add_fallible(&read(record, i)?, strict)
+                    .add_fallible(&read(record, i)?, true)
                     .map_err(PyPolarsErr::from)?;
             }
             PyResult::Ok(())
@@ -162,11 +166,12 @@ impl PyDataFrame {
 fn read_row<'py>(
     values: impl ExactSizeIterator<Item = Bound<'py, PyAny>>,
     dtypes: &[&DataType],
+    strict: bool,
 ) -> PyResult<Row<'static>> {
     let mut row = Vec::with_capacity(values.len());
     for (i, value) in values.enumerate() {
         let dtype = dtypes.get(i).copied();
-        row.push(py_object_to_any_value(&value, true, true, dtype)?);
+        row.push(py_object_to_any_value(&value, strict, true, dtype)?);
     }
     Ok(Row(row))
 }

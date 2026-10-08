@@ -197,6 +197,41 @@ def test_df_init_rows_nested_strict(
 
 
 @pytest.mark.parametrize(
+    ("dtype", "value", "invalid", "non_strict", "error"),
+    [
+        (pl.Int64, 1, "x", None, ComputeError),
+        (pl.Int64, 1, [1], None, ComputeError),
+        (pl.Int64, 1, 2**130, None, OverflowError),
+        (pl.String, "a", [1], None, ComputeError),
+        (pl.Date, date(2020, 1, 1), "x", None, ComputeError),
+        (pl.List(pl.Int64), [1], [1, "a"], [1, None], TypeError),
+        (pl.Map(pl.String, pl.Int64), {"k": 1}, {"k": "1"}, {"k": 1}, TypeError),
+    ],
+)
+@pytest.mark.parametrize("as_dicts", [True, False])
+def test_df_init_rows_non_strict(
+    dtype: pl.DataType,
+    value: Any,
+    invalid: Any,
+    non_strict: Any,
+    error: type[Exception],
+    as_dicts: bool,
+) -> None:
+    def init(strict: bool) -> pl.DataFrame:
+        if as_dicts:
+            data = [{"x": value}, {"x": invalid}]
+            return pl.from_dicts(data, schema={"x": dtype}, strict=strict)
+        rows = [(value,), (invalid,)]
+        return pl.DataFrame(rows, schema={"x": dtype}, orient="row", strict=strict)
+
+    with pytest.raises(error):
+        init(strict=True)
+
+    # non-strict, an invalid value is cast or else null
+    assert init(strict=False).to_series().to_list() == [value, non_strict]
+
+
+@pytest.mark.parametrize(
     ("dtype", "values", "expected"),
     [
         (None, [{"a": 1}, {"a": 2.5}], [{"a": 1.0}, {"a": 2.5}]),
