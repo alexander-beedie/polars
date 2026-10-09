@@ -22,6 +22,40 @@ class ExprArrayNameSpace:
     def __init__(self, expr: Expr) -> None:
         self._pyexpr = expr._pyexpr
 
+    def unnest(self, depth: int = 1) -> Expr:
+        """
+        Flatten nested arrays or lists within each array, preserving rows.
+
+        The output remains an Array when every flattened level is an Array.
+        A null inner array contributes its fixed number of null elements;
+        a null inner list contributes one null. Null outer rows stay null.
+
+        .. engine-support:: in-memory, streaming, distributed
+
+        Parameters
+        ----------
+        depth
+            Number of inner array or list levels to flatten. Zero returns the
+            original expression; the default is one. A depth greater than the
+            available inner levels raises an error.
+
+        Examples
+        --------
+        >>> s = pl.Series(
+        ...     "a",
+        ...     [[[[1, 2], [3, 4]], [[5, 6], [7, 8]]]],
+        ...     dtype=pl.Array(pl.Array(pl.Array(pl.Int64, 2), 2), 2),
+        ... )
+        >>> s.arr.unnest().dtype
+        Array(Int64, shape=(4, 2))
+        >>> s.arr.unnest(2).dtype
+        Array(Int64, shape=(8,))
+        """
+        if depth < 0:
+            msg = "depth must be non-negative"
+            raise ValueError(msg)
+        return wrap_expr(self._pyexpr.arr_unnest(depth))
+
     def len(self) -> Expr:
         """
         Return the number of elements in each array.

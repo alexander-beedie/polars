@@ -12,6 +12,7 @@ pub fn function_expr_to_udf(func: IRArrayFunction) -> SpecialEq<Arc<dyn ColumnsU
     use IRArrayFunction::*;
     match func {
         Concat => map_as_slice!(concat_arr),
+        Unnest(depth) => map!(super::unnest::unnest, depth),
         Length => map!(length),
         Min => map!(min),
         Max => map!(max),

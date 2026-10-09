@@ -8,6 +8,10 @@ use crate::expr::PyExpr;
 
 #[pymethods]
 impl PyExpr {
+    fn arr_unnest(&self, depth: usize) -> Self {
+        self.inner.clone().arr().unnest(depth).into()
+    }
+
     fn arr_len(&self) -> Self {
         self.inner.clone().arr().len().into()
     }

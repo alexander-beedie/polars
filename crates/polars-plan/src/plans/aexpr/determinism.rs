@@ -265,6 +265,7 @@ fn is_inherently_nondeterministic_array_fn(f: &IRArrayFunction) -> bool {
     use IRArrayFunction as A;
     match f {
         A::Length
+        | A::Unnest(_)
         | A::Min
         | A::Max
         | A::Sum
@@ -319,6 +320,7 @@ fn is_inherently_nondeterministic_list_fn(f: &IRListFunction) -> bool {
     use IRListFunction as L;
     match f {
         L::Concat
+        | L::Unnest(_)
         | L::Slice
         | L::Shift
         | L::Get(_)

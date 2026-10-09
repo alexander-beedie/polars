@@ -37,4 +37,5 @@ The following methods are available under the `Series.arr` attribute.
     Series.arr.to_list
     Series.arr.to_struct
     Series.arr.unique
+    Series.arr.unnest
     Series.arr.var

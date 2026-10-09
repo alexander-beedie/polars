@@ -13,6 +13,7 @@ pub fn function_expr_to_udf(func: IRListFunction) -> SpecialEq<Arc<dyn ColumnsUd
     use IRListFunction::*;
     match func {
         Concat => wrap!(concat),
+        Unnest(depth) => map!(super::unnest::unnest, depth),
         #[cfg(feature = "is_in")]
         Contains {
             nulls_equal,

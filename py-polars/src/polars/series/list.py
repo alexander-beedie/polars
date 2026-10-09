@@ -27,6 +27,25 @@ class ListNameSpace(_NamespaceSuggestMixin):
     def __init__(self, series: Series) -> None:
         self._s: PySeries = series._s
 
+    def unnest(self, depth: int = 1) -> Series:
+        """
+        Flatten nested lists or arrays within each list, preserving rows.
+
+        Parameters
+        ----------
+        depth
+            Number of inner list or array levels to flatten. The default is one.
+
+        Returns
+        -------
+        Series
+            The flattened list Series.
+
+        See Also
+        --------
+        Expr.list.unnest
+        """
+
     def all(self, *, ignore_nulls: bool = True) -> Series:
         """
         Evaluate whether all boolean values in a list are true.

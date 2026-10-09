@@ -347,6 +347,7 @@ pub fn ir_function_to_dsl(input: Vec<Expr>, function: IRFunctionExpr) -> Expr {
             F::ArrayExpr(match f {
                 IA::Concat => A::Concat,
                 IA::Length => A::Length,
+                IA::Unnest(depth) => A::Unnest(depth),
                 IA::Min => A::Min,
                 IA::Max => A::Max,
                 IA::Sum => A::Sum,
@@ -444,6 +445,7 @@ pub fn ir_function_to_dsl(input: Vec<Expr>, function: IRFunctionExpr) -> Expr {
             use ListFunction as L;
             F::ListExpr(match f {
                 IL::Concat => L::Concat,
+                IL::Unnest(depth) => L::Unnest(depth),
                 #[cfg(feature = "is_in")]
                 IL::Contains { nulls_equal, .. } => L::Contains { nulls_equal },
                 #[cfg(feature = "list_drop_nulls")]

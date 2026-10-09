@@ -139,6 +139,7 @@ pub(crate) mod struct_;
 mod temporal;
 #[cfg(feature = "trigonometry")]
 mod trigonometry;
+mod unnest;
 
 pub use groups_dispatch::drop_items;
 

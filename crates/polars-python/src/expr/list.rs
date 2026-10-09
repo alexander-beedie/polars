@@ -9,6 +9,10 @@ use crate::conversion::Wrap;
 
 #[pymethods]
 impl PyExpr {
+    fn list_unnest(&self, depth: usize) -> Self {
+        self.inner.clone().list().unnest(depth).into()
+    }
+
     fn list_arg_max(&self) -> Self {
         self.inner.clone().list().arg_max().into()
     }

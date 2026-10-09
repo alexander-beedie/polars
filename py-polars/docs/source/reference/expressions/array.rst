@@ -37,4 +37,5 @@ The following methods are available under the `expr.arr` attribute.
     Expr.arr.to_list
     Expr.arr.to_struct
     Expr.arr.unique
+    Expr.arr.unnest
     Expr.arr.var

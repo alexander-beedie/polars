@@ -35,6 +35,7 @@ pub(super) fn convert_functions(
             use IRArrayFunction as IA;
             I::ArrayExpr(match array_function {
                 A::Length => IA::Length,
+                A::Unnest(depth) => IA::Unnest(depth),
                 A::Min => IA::Min,
                 A::Max => IA::Max,
                 A::Sum => IA::Sum,
@@ -184,6 +185,7 @@ pub(super) fn convert_functions(
             use ListFunction as L;
             I::ListExpr(match list_function {
                 L::Concat => IL::Concat,
+                L::Unnest(depth) => IL::Unnest(depth),
                 #[cfg(feature = "is_in")]
                 L::Contains { nulls_equal } => IL::Contains {
                     nulls_equal,

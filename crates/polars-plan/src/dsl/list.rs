@@ -10,6 +10,12 @@ use crate::prelude::*;
 pub struct ListNameSpace(pub Expr);
 
 impl ListNameSpace {
+    /// Flatten `depth` inner list or array levels into each list, preserving rows.
+    pub fn unnest(self, depth: usize) -> Expr {
+        self.0
+            .map_unary(FunctionExpr::ListExpr(ListFunction::Unnest(depth)))
+    }
+
     #[cfg(feature = "list_drop_nulls")]
     pub fn drop_nulls(self) -> Expr {
         self.0

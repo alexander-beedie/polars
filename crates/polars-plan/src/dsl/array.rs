@@ -7,6 +7,12 @@ use crate::prelude::*;
 pub struct ArrayNameSpace(pub Expr);
 
 impl ArrayNameSpace {
+    /// Flatten `depth` inner array or list levels into each array, preserving rows.
+    pub fn unnest(self, depth: usize) -> Expr {
+        self.0
+            .map_unary(FunctionExpr::ArrayExpr(ArrayFunction::Unnest(depth)))
+    }
+
     /// Compute the length of every subarray.
     pub fn len(self) -> Expr {
         self.0

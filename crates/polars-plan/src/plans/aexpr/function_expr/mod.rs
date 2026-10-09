@@ -108,6 +108,44 @@ pub enum MinMaxByOrder {
     Total { nulls_largest: bool },
 }
 
+/// Output dtype of a List/Array `unnest`: an Array of the multiplied widths if the outer and all
+/// flattened levels are Arrays, otherwise a List.
+pub fn unnest_dtype(dtype: &DataType, depth: usize) -> PolarsResult<DataType> {
+    // The flattened width, as long as every level so far is an Array.
+    let mut width = Some(1usize);
+    let mut inner = dtype;
+    for level in 0..=depth {
+        inner = match inner {
+            DataType::List(inner) => {
+                width = None;
+                inner
+            },
+            #[cfg(feature = "dtype-array")]
+            DataType::Array(inner, size) => {
+                if let Some(w) = width {
+                    width = Some(w.checked_mul(*size).ok_or_else(
+                        || polars_err!(ComputeError: "unnest width of {dtype} overflows usize"),
+                    )?);
+                }
+                inner
+            },
+            _ if level == 0 => {
+                polars_bail!(InvalidOperation: "unnest requires a List or Array dtype, got {dtype}")
+            },
+            _ => polars_bail!(
+                InvalidOperation: "unnest depth {depth} exceeds the nesting depth of {dtype}"
+            ),
+        };
+    }
+    Ok(match width {
+        None => DataType::List(Box::new(inner.clone())),
+        #[cfg(feature = "dtype-array")]
+        Some(width) => DataType::Array(Box::new(inner.clone()), width),
+        #[cfg(not(feature = "dtype-array"))]
+        Some(_) => unreachable!(),
+    })
+}
+
 #[cfg_attr(feature = "ir_serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Clone, PartialEq, Debug)]
 pub enum IRFunctionExpr {

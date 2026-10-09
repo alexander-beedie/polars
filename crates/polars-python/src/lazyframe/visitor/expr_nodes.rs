@@ -309,6 +309,7 @@ impl PyStructFunction {
 #[derive(Copy, Clone, PartialEq)]
 pub enum PyListFunction {
     Concat,
+    Unnest,
     Contains,
     DropNulls,
     Get,
@@ -347,6 +348,7 @@ impl PyListFunction {
 #[derive(Copy, Clone, PartialEq)]
 pub enum PyArrayFunction {
     Length,
+    Unnest,
     Min,
     Max,
     Sum,
@@ -1087,6 +1089,9 @@ pub(crate) fn into_py(py: Python<'_>, expr: &AExpr) -> PyResult<Py<PyAny>> {
             function_data: match function {
                 IRFunctionExpr::ArrayExpr(f) => match f {
                     IRArrayFunction::Length => (PyArrayFunction::Length,).into_py_any(py),
+                    IRArrayFunction::Unnest(depth) => {
+                        (PyArrayFunction::Unnest, depth).into_py_any(py)
+                    },
                     IRArrayFunction::Min => (PyArrayFunction::Min,).into_py_any(py),
                     IRArrayFunction::Max => (PyArrayFunction::Max,).into_py_any(py),
                     IRArrayFunction::Sum => (PyArrayFunction::Sum,).into_py_any(py),
@@ -1151,6 +1156,9 @@ pub(crate) fn into_py(py: Python<'_>, expr: &AExpr) -> PyResult<Py<PyAny>> {
                 },
                 IRFunctionExpr::ListExpr(listfun) => match listfun {
                     IRListFunction::Concat => (PyListFunction::Concat,).into_py_any(py),
+                    IRListFunction::Unnest(depth) => {
+                        (PyListFunction::Unnest, depth).into_py_any(py)
+                    },
                     #[cfg(feature = "is_in")]
                     IRListFunction::Contains { nulls_equal, .. } => {
                         (PyListFunction::Contains, nulls_equal).into_py_any(py)

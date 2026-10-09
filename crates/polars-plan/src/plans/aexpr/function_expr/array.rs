@@ -8,6 +8,7 @@ use super::*;
 #[cfg_attr(feature = "ir_serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum IRArrayFunction {
     Length,
+    Unnest(usize),
     Min,
     Max,
     Sum,
@@ -68,6 +69,9 @@ impl IRArrayFunction {
                 )?,
             )),
             Length => mapper.ensure_is_array()?.with_dtype(IDX_DTYPE),
+            Unnest(depth) => mapper
+                .ensure_is_array()?
+                .try_map_dtype(|dtype| super::unnest_dtype(dtype, *depth)),
             Min | Max => mapper
                 .ensure_is_array()?
                 .map_to_list_and_array_inner_dtype(),
@@ -159,6 +163,7 @@ impl IRArrayFunction {
             A::Dot => FunctionOptions::elementwise()
                 .with_casting_rules(CastingRules::cast_to_supertypes()),
             A::Length
+            | A::Unnest(_)
             | A::Min
             | A::Max
             | A::Sum
@@ -216,6 +221,7 @@ impl Display for IRArrayFunction {
         let name = match self {
             Concat => "concat",
             Length => "length",
+            Unnest(_) => "unnest",
             Min => "min",
             Max => "max",
             Sum => "sum",

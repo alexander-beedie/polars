@@ -13,6 +13,7 @@ use super::FunctionExpr;
 #[cfg_attr(feature = "dsl-schema", derive(schemars::JsonSchema))]
 pub enum ArrayFunction {
     Length,
+    Unnest(usize),
     Slice(i64, i64),
     Min,
     Max,
@@ -49,6 +50,7 @@ impl fmt::Display for ArrayFunction {
         let name = match self {
             Concat => "concat",
             Length => "length",
+            Unnest(_) => "unnest",
             Slice(_, _) => "slice",
             Min => "min",
             Max => "max",

@@ -22,6 +22,26 @@ class ArrayNameSpace:
     def __init__(self, series: Series) -> None:
         self._s: PySeries = series._s
 
+    def unnest(self, depth: int = 1) -> Series:
+        """
+        Flatten nested arrays or lists within each array, preserving rows.
+
+        Parameters
+        ----------
+        depth
+            Number of inner array or list levels to flatten. The default is one.
+
+        Returns
+        -------
+        Series
+            The flattened Array when all removed levels are arrays, otherwise
+            a List Series.
+
+        See Also
+        --------
+        Expr.arr.unnest
+        """
+
     def min(self) -> Series:
         """
         Compute the min values of the sub-arrays.

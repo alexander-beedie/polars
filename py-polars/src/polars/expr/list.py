@@ -29,6 +29,42 @@ class ExprListNameSpace(_NamespaceSuggestMixin):
     def __init__(self, expr: Expr) -> None:
         self._pyexpr = expr._pyexpr
 
+    def unnest(self, depth: int = 1) -> Expr:
+        """
+        Flatten nested lists or arrays within each list, preserving rows.
+
+        A null inner list contributes one null. A null inner array contributes
+        its fixed number of null elements. Null outer rows stay null.
+
+        .. engine-support:: in-memory, streaming, distributed
+
+        Parameters
+        ----------
+        depth
+            Number of inner list or array levels to flatten. Zero returns the
+            original expression; the default is one. A depth greater than the
+            available inner levels raises an error.
+
+        Examples
+        --------
+        >>> pl.DataFrame({"data": [[[1, 2], [3]], [[4]]]}).select(
+        ...     pl.col("data").list.unnest()
+        ... )
+        shape: (2, 1)
+        ┌───────────┐
+        │ data      │
+        │ ---       │
+        │ list[i64] │
+        ╞═══════════╡
+        │ [1, 2, 3] │
+        │ [4]       │
+        └───────────┘
+        """
+        if depth < 0:
+            msg = "depth must be non-negative"
+            raise ValueError(msg)
+        return wrap_expr(self._pyexpr.list_unnest(depth))
+
     def __getitem__(self, item: int) -> Expr:
         """
         Get the value by index in the sublists.
