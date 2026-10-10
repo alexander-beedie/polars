@@ -97,7 +97,14 @@ impl ChunkReverse for StringChunked {
 impl ChunkReverse for ArrayChunked {
     fn reverse(&self) -> Self {
         if !self.inner_dtype().is_primitive_numeric() {
-            todo!("reverse for FixedSizeList with non-numeric dtypes not yet supported")
+            // SAFETY: we know we are within bounds.
+            return unsafe {
+                self.take_unchecked(
+                    &(0..self.len() as IdxSize)
+                        .rev()
+                        .collect_ca(PlSmallStr::EMPTY),
+                )
+            };
         }
         let ca = self.rechunk();
         let arr = ca.downcast_as_array();
