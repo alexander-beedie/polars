@@ -144,7 +144,7 @@ impl DataFrame {
         if col_len < max_width {
             let df = if col_len < self.width() { self } else { other };
 
-            for i in col_len..max_len {
+            for i in col_len..max_width {
                 let s = &df.columns().get(i).ok_or_else(|| polars_err!(InvalidOperation: "cannot do arithmetic on DataFrames with shapes: {:?} and {:?}", self.shape(), other.shape()))?;
                 let name = s.name();
                 let dtype = s.dtype();

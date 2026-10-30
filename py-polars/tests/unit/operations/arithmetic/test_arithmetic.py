@@ -608,6 +608,31 @@ def test_arithmetic_on_df() -> None:
         _ = df + [1]  # type: ignore[operator]
 
 
+@pytest.mark.parametrize(
+    "op",
+    [
+        operator.add,
+        operator.sub,
+        operator.mul,
+        operator.truediv,
+        operator.mod,
+    ],
+)
+@pytest.mark.parametrize("height", [1, 3])
+def test_df_arithmetic_width_mismatch(
+    op: Callable[[pl.DataFrame, pl.DataFrame], pl.DataFrame], height: int
+) -> None:
+    # columns without a counterpart are null-filled, whether the frame
+    # height is less than (1) or greater than (3) the frame width (2)
+    wide = pl.DataFrame({"a": [6] * height, "b": [4] * height})
+    narrow = pl.DataFrame({"x": [3] * height})
+    for lhs, rhs, name in ((wide, narrow, "a"), (narrow, wide, "x")):
+        out = op(lhs, rhs)
+        assert out.columns == [name, "b"]
+        assert out[name].to_list() == [op(lhs[0, 0], rhs[0, 0])] * height
+        assert out["b"].null_count() == height
+
+
 def test_df_series_division() -> None:
     df = pl.DataFrame(
         {
@@ -1018,9 +1043,14 @@ def test_time_time_sub() -> None:
     }
 
 
-def test_raise_invalid_shape() -> None:
-    with pytest.raises(InvalidOperationError):
-        pl.DataFrame([[1, 2], [3, 4]]) * pl.DataFrame([1, 2, 3])
+def test_df_arithmetic_shape_mismatch_17269() -> None:
+    # shorter columns and missing columns are null-filled
+    out = pl.DataFrame([[1, 2], [3, 4]]) * pl.DataFrame([1, 2, 3])
+    expected = pl.DataFrame(
+        {"column_0": [1, 4, None], "column_1": [None, None, None]},
+        schema={"column_0": pl.Int64, "column_1": pl.Int64},
+    )
+    assert_frame_equal(out, expected)
 
 
 def test_integer_divide_scalar_zero_lhs_19142() -> None:
