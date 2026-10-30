@@ -333,6 +333,35 @@ def test_truncdiv_nested() -> None:
     ]
 
 
+@pytest.mark.parametrize("dtype", [pl.Float32, pl.Float64])
+@pytest.mark.parametrize("divisor", [49.0, -49.0, 0.1, -0.001])
+def test_float_division_by_scalar_matches_column(
+    dtype: PolarsDataType, divisor: float
+) -> None:
+    # Multiplying by the reciprocal is inexact: 49.0 * (1 / 49.0) != 1.0.
+    values = [k * divisor for k in range(-1000, 1001)]
+    df = pl.DataFrame(
+        {"x": values, "d": [divisor] * len(values)},
+        schema={"x": dtype, "d": dtype},
+    )
+    ops: dict[str, Callable[[pl.Expr, pl.Expr], pl.Expr]] = {
+        "floordiv": operator.floordiv,
+        "truncdiv": pl.Expr.truncdiv,
+        "mod": operator.mod,
+        "truediv": operator.truediv,
+    }
+    scalar = df.select(
+        **{k: op(pl.col("x"), pl.lit(divisor, dtype)) for k, op in ops.items()}
+    )
+    column = df.select(**{k: op(pl.col("x"), pl.col("d")) for k, op in ops.items()})
+    assert_frame_equal(scalar, column)
+
+    s = pl.Series([49.0, -98.0], dtype=dtype)
+    assert (s // 49.0).to_list() == [1.0, -2.0]
+    assert (s % 49.0).to_list() == [0.0, 0.0]
+    assert (s / 49.0).to_list() == [1.0, -2.0]
+
+
 def test_series_expr_arithm() -> None:
     s = pl.Series([1, 2, 3])
     assert (s + pl.col("a")).meta == pl.lit(s) + pl.col("a")

@@ -14,6 +14,20 @@ fn test_series_arithmetic() -> PolarsResult<()> {
 }
 
 #[test]
+fn test_int_true_div_scalar_matches_division() {
+    // note: multiplying by the reciprocal is inexact: 49 * (1 / 49) != 1.
+    let values: Vec<i64> = (-1000..1000).map(|k| k * 49).collect();
+    let out = Int64Chunked::from_slice("a".into(), &values).true_div_scalar(49);
+    let expected: Vec<f64> = values.iter().map(|&x| x as f64 / 49.0).collect();
+    assert_eq!(out.into_no_null_iter().collect::<Vec<_>>(), expected);
+
+    let values: Vec<u64> = (0..1000).map(|k| k * 49).collect();
+    let out = UInt64Chunked::from_slice("a".into(), &values).true_div_scalar(49);
+    let expected: Vec<f64> = values.iter().map(|&x| x as f64 / 49.0).collect();
+    assert_eq!(out.into_no_null_iter().collect::<Vec<_>>(), expected);
+}
+
+#[test]
 fn test_min_max_sorted_asc() {
     let a = &mut Series::new("a".into(), &[1, 2, 3, 4]);
     a.set_sorted_flag(IsSorted::Ascending);
