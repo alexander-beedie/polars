@@ -483,16 +483,25 @@ pub(super) fn index_of(s: &mut [Column]) -> PolarsResult<Column> {
         InvalidOperation: "needle of `index_of` can only contain a single value, found {} values",
         needle_s.len()
     );
-    // Type coercion leaves a string needle of a Categorical as is, to be looked up here.
-    let needle_s = &if series.dtype().is_categorical() && needle_s.dtype().is_string() {
-        let (needle_s, _) =
-            polars_ops::series::cast_to_match(needle_s.as_materialized_series(), series.dtype())?;
-        if needle_s.is_empty() {
-            return Ok(Column::full_null(series.name().clone(), 1, &IDX_DTYPE));
-        }
-        needle_s.into_column()
-    } else {
-        needle_s.clone()
+    let needle_s = &match (series.dtype(), needle_s.dtype()) {
+        // Type coercion leaves a string needle of a Categorical or Enum as is, to be looked up
+        // here: casting adds it to a Categorical's categories, and fails or gives null for one
+        // an Enum lacks.
+        #[cfg(feature = "dtype-categorical")]
+        (DataType::Categorical(_, mapping) | DataType::Enum(_, mapping), DataType::String) => {
+            let av = match needle_s.str()?.get(0) {
+                None => AnyValue::Null,
+                Some(v) => match mapping.get_cat(v) {
+                    Some(cat) if series.dtype().is_enum() => {
+                        AnyValue::EnumOwned(cat, mapping.clone())
+                    },
+                    Some(cat) => AnyValue::CategoricalOwned(cat, mapping.clone()),
+                    None => return Ok(Column::full_null(series.name().clone(), 1, &IDX_DTYPE)),
+                },
+            };
+            Scalar::new(series.dtype().clone(), av).into_column(needle_s.name().clone())
+        },
+        _ => needle_s.clone(),
     };
     let needle = Scalar::new(
         needle_s.dtype().clone(),
@@ -609,14 +618,18 @@ pub(super) fn sign(s: &Column) -> PolarsResult<Column> {
 }
 
 pub(super) fn fill_null(s: &[Column]) -> PolarsResult<Column> {
-    // Type coercion leaves a string fill value of a Categorical as is (casting
-    // adds it to the categories); that is only done here, when it fills nulls.
+    // Type coercion leaves a string fill value of a Categorical as is, as casting adds
+    // it to the categories: it is only cast here, where it fills a null.
     let fill_value = || {
-        if s[0].dtype().is_categorical() && s[1].dtype().is_string() {
-            s[1].cast(s[0].dtype())
-        } else {
-            Ok(s[1].clone())
+        if !(s[0].dtype().is_categorical() && s[1].dtype().is_string()) {
+            return Ok(s[1].clone());
         }
+        let mut fill_value = s[1].clone();
+        if fill_value.len() == s[0].len() {
+            let nulls = Column::full_null(PlSmallStr::EMPTY, fill_value.len(), &DataType::String);
+            fill_value = fill_value.zip_with_same_type(&s[0].is_null(), &nulls)?;
+        }
+        fill_value.cast(s[0].dtype())
     };
     match (s[0].len(), s[1].len()) {
         (a, b) if a == b || b == 1 => {

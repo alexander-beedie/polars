@@ -192,10 +192,15 @@ impl Default for FunctionFlags {
 pub enum CastingRules {
     /// Whether information may be lost during cast. E.g. a float to int is considered lossy,
     /// whereas int to int is considered lossless.
-    /// Overflowing is not considered in this flag, that's handled in `strict` casting
-    FirstArgLossless,
-    /// Like `FirstArgLossless`, but falls back to the deprecated supertype casting.
-    // @3.0: Replace by `FirstArgLossless`.
+    /// Overflowing is not considered in this flag, that's handled in `strict` casting.
+    ///
+    /// String arguments of a `Categorical` or `Enum` first argument are not cast (which adds them
+    /// to a `Categorical`'s categories, and fails or gives null for those an `Enum` lacks): the
+    /// function must look them up.
+    FirstArgLosslessKeepString,
+    /// Like `FirstArgLosslessKeepString`, but only keeps strings for a `Categorical`, and falls
+    /// back to the deprecated supertype casting.
+    // @3.0: Drop the supertype fallback.
     FirstArgLosslessOrSupertypeWithWarning,
     Supertype(SuperTypeOptions),
 }
