@@ -1,3 +1,4 @@
+use polars_core::chunked_array::cast::CastOptions;
 use polars_core::prelude::*;
 use polars_core::utils::try_get_supertype;
 use polars_defs::join::{JoinArgs, JoinCoalesce, JoinType};
@@ -30,24 +31,7 @@ fn find_output_length(
 
 /// Replace values by different values of the same data type.
 pub fn replace(s: &Series, old: &ListChunked, new: &ListChunked) -> PolarsResult<Series> {
-    find_output_length(
-        "replace",
-        [("self", s.len()), ("old", old.len()), ("new", new.len())],
-    )?;
-
-    polars_ensure!(
-        old.len() == 1 && new.len() == 1,
-        nyi = "`replace` with a replacement pattern per row"
-    );
-
-    let old = old.explode(ExplodeOptions {
-        empty_as_null: false,
-        keep_nulls: true,
-    })?;
-    let new = new.explode(ExplodeOptions {
-        empty_as_null: false,
-        keep_nulls: true,
-    })?;
+    let (old, new) = unpack_replacements("replace", s, old, new, None)?;
 
     if old.is_empty() {
         return Ok(s.clone());
@@ -55,18 +39,7 @@ pub fn replace(s: &Series, old: &ListChunked, new: &ListChunked) -> PolarsResult
     validate_old(&old)?;
 
     let dtype = s.dtype();
-    let (old, kept) = cast_to_match(&old, dtype)?;
-    let new = filter_new(new, kept.as_ref())?;
-    if old.is_empty() {
-        return Ok(s.clone());
-    }
-    let new = new.strict_cast(dtype)?;
-
-    if new.len() == 1 {
-        replace_by_single(s, &old, &new, s)
-    } else {
-        replace_by_multiple(s, old, new, s)
-    }
+    execute_replacement(s, old, new, Some(dtype), CastOptions::Strict, Some(s))
 }
 
 /// Replace all values by different values.
@@ -79,29 +52,7 @@ pub fn replace_or_default(
     default: &Series,
     return_dtype: Option<DataType>,
 ) -> PolarsResult<Series> {
-    find_output_length(
-        "replace_strict",
-        [
-            ("self", s.len()),
-            ("old", old.len()),
-            ("new", new.len()),
-            ("default", default.len()),
-        ],
-    )?;
-
-    polars_ensure!(
-        old.len() == 1 && new.len() == 1,
-        nyi = "`replace_strict` with a replacement pattern per row"
-    );
-
-    let old = old.explode(ExplodeOptions {
-        empty_as_null: false,
-        keep_nulls: true,
-    })?;
-    let new = new.explode(ExplodeOptions {
-        empty_as_null: false,
-        keep_nulls: true,
-    })?;
+    let (old, new) = unpack_replacements("replace_strict", s, old, new, Some(default))?;
 
     polars_ensure!(
         default.len() == s.len() || default.len() == 1,
@@ -119,18 +70,14 @@ pub fn replace_or_default(
         return default.broadcast_owned_to(s.len());
     }
 
-    let (old, kept) = cast_to_match(&old, s.dtype())?;
-    let new = filter_new(new, kept.as_ref())?;
-    if old.is_empty() {
-        return default.broadcast_owned_to(s.len());
-    }
-    let new = new.cast(&return_dtype)?;
-
-    if new.len() == 1 {
-        replace_by_single(s, &old, &new, &default)
-    } else {
-        replace_by_multiple(s, old, new, &default)
-    }
+    execute_replacement(
+        s,
+        old,
+        new,
+        Some(&return_dtype),
+        CastOptions::NonStrict,
+        Some(&default),
+    )
 }
 
 /// Replace all values by different values.
@@ -142,24 +89,7 @@ pub fn replace_strict(
     new: &ListChunked,
     return_dtype: Option<DataType>,
 ) -> PolarsResult<Series> {
-    find_output_length(
-        "replace_strict",
-        [("self", s.len()), ("old", old.len()), ("new", new.len())],
-    )?;
-
-    polars_ensure!(
-        old.len() == 1 && new.len() == 1,
-        nyi = "`replace_strict` with a replacement pattern per row"
-    );
-
-    let old = old.explode(ExplodeOptions {
-        empty_as_null: false,
-        keep_nulls: true,
-    })?;
-    let new = new.explode(ExplodeOptions {
-        empty_as_null: false,
-        keep_nulls: true,
-    })?;
+    let (old, new) = unpack_replacements("replace_strict", s, old, new, None)?;
 
     if old.is_empty() {
         polars_ensure!(
@@ -179,25 +109,276 @@ pub fn replace_strict(
         )
     }
 
+    execute_replacement(
+        s,
+        old,
+        new,
+        return_dtype.as_ref(),
+        CastOptions::Strict,
+        None,
+    )
+}
+
+fn unpack_replacements(
+    op: &str,
+    s: &Series,
+    old: &ListChunked,
+    new: &ListChunked,
+    default: Option<&Series>,
+) -> PolarsResult<(Series, Series)> {
+    let lengths = [("self", s.len()), ("old", old.len()), ("new", new.len())];
+    find_output_length(
+        op,
+        lengths
+            .into_iter()
+            .chain(default.map(|value| ("default", value.len()))),
+    )?;
+    polars_ensure!(
+        old.len() == 1 && new.len() == 1,
+        nyi = "`{}` with a replacement pattern per row",
+        op
+    );
+    let options = ExplodeOptions {
+        empty_as_null: false,
+        keep_nulls: true,
+    };
+    Ok((old.explode(options)?, new.explode(options)?))
+}
+
+/// Validate replacements before filtering and defer category-producing casts.
+fn execute_replacement(
+    s: &Series,
+    old: Series,
+    new: Series,
+    output_dtype: Option<&DataType>,
+    cast_options: CastOptions,
+    default: Option<&Series>,
+) -> PolarsResult<Series> {
     let (old, kept) = cast_to_match(&old, s.dtype())?;
-    let new = filter_new(new, kept.as_ref())?;
-    if old.is_empty() {
-        // No `old` value can match, so all values are unmatched (a null mask): only nulls pass.
-        let mask = BooleanChunked::full_null(PlSmallStr::EMPTY, s.len());
-        ensure_all_replaced(&mask, s, false, false)?;
-        let dtype = return_dtype.unwrap_or_else(|| new.dtype().clone());
-        return Ok(Series::full_null(s.name().clone(), s.len(), &dtype));
+    let requested_dtype = output_dtype.unwrap_or(new.dtype());
+    let validation_dtype = dtype_without_category_registration(new.dtype(), requested_dtype);
+    let defer_cast = &validation_dtype != requested_dtype;
+    let validated = if new.dtype() == &validation_dtype {
+        new.clone()
+    } else {
+        new.cast_with_options(&validation_dtype, cast_options)?
+    };
+    let mut resolved_dtype = validated.dtype().clone();
+    if defer_cast {
+        restore_requested_categories(requested_dtype, &mut resolved_dtype);
+    }
+    let new = filter_new(if defer_cast { new } else { validated }, kept.as_ref())?;
+    if new.len() != 1 {
+        validate_new(&new, old.len())?;
     }
 
-    let new = match return_dtype {
-        Some(dtype) => new.strict_cast(&dtype)?,
-        None => new,
+    if old.is_empty() {
+        return unmatched_result(s, &resolved_dtype, default);
+    }
+    if !defer_cast && new.len() == 1 {
+        return match default {
+            Some(default) => replace_by_single(s, &old, &new, default),
+            None => replace_by_single_strict(s, &old, &new),
+        };
+    }
+    let direct_value = !defer_cast && new.null_count() == 0;
+    let joined = join_mapping_column(s, &old, direct_value.then_some(&new))?;
+    let missing = joined.null_count();
+    let new = if defer_cast {
+        cast_matched_replacements(new, old.len(), joined.idx()?, &resolved_dtype, cast_options)?
+    } else {
+        new
     };
+    if missing == s.len() {
+        return unmatched_result(s, new.dtype(), default);
+    }
+    if default.is_none() {
+        let allowed_nulls = if old.null_count() > 0 {
+            0
+        } else {
+            s.null_count()
+        };
+        ensure_mapping_complete(missing == allowed_nulls)?;
+    }
+    let out = if direct_value {
+        joined.clone()
+    } else {
+        new.take(joined.idx()?)?
+    };
+    match default {
+        Some(default) if missing > 0 => out.zip_with(&joined.is_not_null(), default),
+        _ => Ok(out),
+    }
+}
+
+fn unmatched_result(
+    s: &Series,
+    dtype: &DataType,
+    default: Option<&Series>,
+) -> PolarsResult<Series> {
+    match default {
+        Some(default) => {
+            let dtype = try_get_supertype(dtype, default.dtype())?;
+            default.cast(&dtype)?.broadcast_owned_to(s.len())
+        },
+        None => {
+            ensure_mapping_complete(s.len() == s.null_count())?;
+            Ok(Series::full_null(s.name().clone(), s.len(), dtype))
+        },
+    }
+}
+
+fn cast_matched_replacements(
+    new: Series,
+    old_len: usize,
+    indices: &IdxCa,
+    dtype: &DataType,
+    cast_options: CastOptions,
+) -> PolarsResult<Series> {
+    let mut present = vec![false; old_len];
+    for index in indices.iter().flatten() {
+        present[index as usize] = true;
+    }
+    let used_count = present.iter().filter(|&&used| used).count();
+    if used_count == 0 {
+        return Ok(Series::full_null(new.name().clone(), old_len, dtype));
+    }
 
     if new.len() == 1 {
-        replace_by_single_strict(s, &old, &new)
-    } else {
-        replace_by_multiple_strict(s, old, new)
+        return Ok(new
+            .cast_with_options(dtype, cast_options)?
+            .new_from_index(0, old_len));
+    }
+    if used_count == old_len {
+        return new.cast_with_options(dtype, cast_options);
+    }
+
+    let present_mask = BooleanChunked::from_slice(PlSmallStr::EMPTY, &present);
+    let new = new
+        .filter(&present_mask)?
+        .cast_with_options(dtype, cast_options)?;
+    let mut next_index: IdxSize = 0;
+    let spread = IdxCa::from_iter_options(
+        PlSmallStr::EMPTY,
+        present.into_iter().map(|used| {
+            if used {
+                let index = next_index;
+                next_index += 1;
+                Some(index)
+            } else {
+                None
+            }
+        }),
+    );
+    new.take(&spread)
+}
+
+/// Keep categorical leaves in their source type while validating the other fields.
+fn dtype_without_category_registration(source: &DataType, target: &DataType) -> DataType {
+    let mut validation_dtype = target.clone();
+    keep_source_categorical_leaves(source, &mut validation_dtype);
+    validation_dtype
+}
+
+fn keep_source_categorical_leaves(source: &DataType, target: &mut DataType) {
+    use DataType as D;
+
+    if !target.contains_categoricals() {
+        return;
+    }
+
+    match target {
+        #[cfg(feature = "dtype-categorical")]
+        D::Categorical(_, _) => {
+            if matches!(source, D::String | D::Categorical(_, _) | D::Enum(_, _)) {
+                *target = source.clone();
+            }
+        },
+        #[cfg(feature = "dtype-struct")]
+        D::Struct(fields) => {
+            if let D::Struct(source_fields) = source {
+                for field in fields {
+                    if let Some(source_field) = source_fields
+                        .iter()
+                        .find(|source_field| source_field.name() == field.name())
+                    {
+                        keep_source_categorical_leaves(source_field.dtype(), &mut field.dtype);
+                    }
+                }
+            }
+        },
+        D::List(inner) => match source.inner_dtype() {
+            Some(source_inner) => keep_source_categorical_leaves(source_inner, inner),
+            None =>
+            {
+                #[cfg(feature = "dtype-map")]
+                if let Some(entries) = source.map_entries_dtype() {
+                    keep_source_categorical_leaves(&entries, inner);
+                }
+            },
+        },
+        #[cfg(feature = "dtype-array")]
+        D::Array(inner, _) => match source.inner_dtype() {
+            Some(source_inner)
+                if source.is_array() && inner.is_categorical() && !source_inner.is_string() => {},
+            Some(source_inner) => keep_source_categorical_leaves(source_inner, inner),
+            None => {},
+        },
+        #[cfg(feature = "dtype-map")]
+        D::Map(key, value) => match source {
+            D::Map(_, source_value) => keep_source_categorical_leaves(source_value, value),
+            D::List(entries) => {
+                if let Ok(D::Map(source_key, source_value)) = entries.map_from_named_entries_dtype()
+                {
+                    keep_source_categorical_leaves(&source_key, key);
+                    keep_source_categorical_leaves(&source_value, value);
+                }
+            },
+            _ => {},
+        },
+        _ => {},
+    }
+}
+
+fn restore_requested_categories(requested: &DataType, resolved: &mut DataType) {
+    if !requested.contains_categoricals() {
+        return;
+    }
+
+    match (requested, resolved) {
+        #[cfg(feature = "dtype-categorical")]
+        (DataType::Categorical(_, _), resolved) => *resolved = requested.clone(),
+        #[cfg(feature = "dtype-struct")]
+        (DataType::Struct(requested_fields), DataType::Struct(resolved_fields)) => {
+            for field in resolved_fields {
+                if let Some(requested_field) = requested_fields
+                    .iter()
+                    .find(|requested_field| requested_field.name() == field.name())
+                {
+                    restore_requested_categories(requested_field.dtype(), &mut field.dtype);
+                }
+            }
+        },
+        (DataType::List(requested), DataType::List(resolved)) => {
+            restore_requested_categories(requested, resolved)
+        },
+        #[cfg(feature = "dtype-array")]
+        (DataType::Array(requested, _), DataType::Array(resolved, _)) => {
+            restore_requested_categories(requested, resolved)
+        },
+        #[cfg(feature = "dtype-map")]
+        (
+            DataType::Map(requested_key, requested_value),
+            DataType::Map(resolved_key, resolved_value),
+        ) => {
+            restore_requested_categories(requested_key, resolved_key);
+            restore_requested_categories(requested_value, resolved_value);
+        },
+        #[cfg(feature = "dtype-extension")]
+        (DataType::Extension(_, requested), DataType::Extension(_, resolved)) => {
+            restore_requested_categories(requested, resolved)
+        },
+        _ => {},
     }
 }
 
@@ -224,13 +405,16 @@ fn replace_by_single(
 /// Fast path for replacing by a single value in strict mode
 fn replace_by_single_strict(s: &Series, old: &Series, new: &Series) -> PolarsResult<Series> {
     let mask = get_replacement_mask(s, old)?;
-    ensure_all_replaced(&mask, s, old.null_count() > 0, true)?;
+    ensure_all_replaced(&mask, s, old.null_count() > 0)?;
 
     let mut out = new.new_from_index(0, s.len());
 
     // Transfer validity from `mask` to `out`.
     if mask.null_count() > 0 {
-        out = out.zip_with(&mask, &Series::new_null(PlSmallStr::EMPTY, s.len()))?
+        out = out.zip_with(
+            &mask,
+            &Series::full_null(PlSmallStr::EMPTY, s.len(), out.dtype()),
+        )?
     }
     Ok(out)
 }
@@ -251,104 +435,36 @@ fn get_replacement_mask(s: &Series, old: &Series) -> PolarsResult<BooleanChunked
     }
 }
 
-/// General case for replacing by multiple values
-fn replace_by_multiple(
-    s: &Series,
-    old: Series,
-    new: Series,
-    default: &Series,
-) -> PolarsResult<Series> {
-    validate_new(&new, old.len())?;
-
-    let df = s.clone().into_frame();
-    let add_replacer_mask = new.null_count() > 0;
-    let replacer = create_replacer(old, new, add_replacer_mask)?;
-
-    let joined = df.join(
-        &replacer,
-        [s.name().as_str()],
-        ["__POLARS_REPLACE_OLD"],
-        JoinArgs {
-            how: JoinType::Left,
-            coalesce: JoinCoalesce::CoalesceColumns,
-            nulls_equal: true,
-            ..Default::default()
-        },
-        None,
-    )?;
-
-    let replaced = joined
-        .column("__POLARS_REPLACE_NEW")
-        .unwrap()
-        .as_materialized_series();
-
-    if replaced.null_count() == 0 {
-        return Ok(replaced.clone());
-    }
-
-    match joined.column("__POLARS_REPLACE_MASK") {
-        Ok(col) => {
-            let mask = col.bool().unwrap();
-            replaced.zip_with(mask, default)
-        },
-        Err(_) => {
-            let mask = &replaced.is_not_null();
-            replaced.zip_with(mask, default)
-        },
-    }
-}
-
-/// General case for replacing by multiple values in strict mode
-fn replace_by_multiple_strict(s: &Series, old: Series, new: Series) -> PolarsResult<Series> {
-    validate_new(&new, old.len())?;
-
-    let df = s.clone().into_frame();
-    let old_has_null = old.null_count() > 0;
-    let replacer = create_replacer(old, new, true)?;
-
-    let joined = df.join(
-        &replacer,
-        [s.name().as_str()],
-        ["__POLARS_REPLACE_OLD"],
-        JoinArgs {
-            how: JoinType::Left,
-            coalesce: JoinCoalesce::CoalesceColumns,
-            nulls_equal: true,
-            ..Default::default()
-        },
-        None,
-    )?;
-
-    let replaced = joined.column("__POLARS_REPLACE_NEW").unwrap();
-
-    let mask = joined
-        .column("__POLARS_REPLACE_MASK")
-        .unwrap()
-        .bool()
-        .unwrap();
-    ensure_all_replaced(mask, s, old_has_null, false)?;
-
-    Ok(replaced.as_materialized_series().clone())
-}
-
-// Build replacer dataframe.
-fn create_replacer(mut old: Series, mut new: Series, add_mask: bool) -> PolarsResult<DataFrame> {
+fn join_mapping_column(s: &Series, old: &Series, new: Option<&Series>) -> PolarsResult<Series> {
+    let mut input = s.clone();
+    input.rename(PlSmallStr::from_static("__POLARS_REPLACE_OLD"));
+    let mut old = old.clone();
     old.rename(PlSmallStr::from_static("__POLARS_REPLACE_OLD"));
-    new.rename(PlSmallStr::from_static("__POLARS_REPLACE_NEW"));
-
-    let len = old.len();
-    let cols = if add_mask {
-        let mask = Column::new_scalar(
-            PlSmallStr::from_static("__POLARS_REPLACE_MASK"),
-            true.into(),
-            new.len(),
-        );
-        vec![old.into(), new.into(), mask]
-    } else {
-        vec![old.into(), new.into()]
+    let result_name = PlSmallStr::from_static("__POLARS_REPLACE_RESULT");
+    let replacer = match new {
+        Some(new) => {
+            let mut new = new.clone();
+            new.rename(result_name.clone());
+            DataFrame::new(old.len(), vec![old.into(), new.into()])?
+        },
+        None => old.into_frame().with_row_index(result_name.clone(), None)?,
     };
-    let out = unsafe { DataFrame::new_unchecked(len, cols) };
-    Ok(out)
+    let joined = input.into_frame().join(
+        &replacer,
+        ["__POLARS_REPLACE_OLD"],
+        ["__POLARS_REPLACE_OLD"],
+        JoinArgs {
+            how: JoinType::Left,
+            coalesce: JoinCoalesce::CoalesceColumns,
+            nulls_equal: true,
+            ..Default::default()
+        },
+        None,
+    )?;
+    Ok(joined
+        .column(result_name.as_str())?
+        .as_materialized_series()
+        .clone())
 }
 
 /// Casts `values` to `dtype` to match them against values of that dtype.
@@ -398,21 +514,17 @@ fn validate_new(new: &Series, old_len: usize) -> PolarsResult<()> {
 }
 
 /// Ensure that all values were replaced.
-fn ensure_all_replaced(
-    mask: &BooleanChunked,
-    s: &Series,
-    old_has_null: bool,
-    check_all: bool,
-) -> PolarsResult<()> {
+fn ensure_all_replaced(mask: &BooleanChunked, s: &Series, old_has_null: bool) -> PolarsResult<()> {
     let nulls_check = if old_has_null {
         mask.null_count() == 0
     } else {
         mask.null_count() == s.null_count()
     };
-    // Checking booleans is only relevant for the 'replace_by_single' path.
-    let bools_check = !check_all || mask.all();
+    let all_replaced = mask.all() && nulls_check;
+    ensure_mapping_complete(all_replaced)
+}
 
-    let all_replaced = bools_check && nulls_check;
+fn ensure_mapping_complete(all_replaced: bool) -> PolarsResult<()> {
     polars_ensure!(
         all_replaced,
         InvalidOperation: "incomplete mapping specified for `replace_strict`\n\nHint: Pass a `default` value to set unmapped values."
