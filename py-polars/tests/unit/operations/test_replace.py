@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+from datetime import date, datetime, timedelta
+from decimal import Decimal as D
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -340,6 +342,60 @@ def test_replace_duplicates_old(old: list[int], new: int | list[int]) -> None:
         match="`old` input for `replace` must not contain duplicates",
     ):
         s.replace(old, new)
+
+
+# https://github.com/pola-rs/polars/issues/31194
+@pytest.mark.parametrize(
+    ("s", "old"),
+    [
+        (pl.Series([2, 3]), pl.Series([2.5, 3.0])),
+        (pl.Series([0, 3]), pl.Series([-0.5, 3.0])),
+        (pl.Series([2, 3]), pl.Series([D("2.5"), D("3")])),
+        (
+            pl.Series([D("2.5"), D("2.6")], dtype=pl.Decimal(10, 1)),
+            pl.Series([D("2.55"), D("2.60")], dtype=pl.Decimal(10, 2)),
+        ),
+        (
+            pl.Series([date(2020, 1, 1), date(2020, 1, 2)]),
+            pl.Series([datetime(2020, 1, 1, 12), datetime(2020, 1, 2)]),
+        ),
+        (
+            pl.Series(
+                [datetime(2020, 1, 1), datetime(2020, 1, 2)], dtype=pl.Datetime("ms")
+            ),
+            pl.Series([datetime(2020, 1, 1, 0, 0, 0, 500), datetime(2020, 1, 2)]),
+        ),
+        (
+            pl.Series([timedelta(milliseconds=1), timedelta(milliseconds=2)]).cast(
+                pl.Duration("ms")
+            ),
+            pl.Series([timedelta(microseconds=1500), timedelta(milliseconds=2)]),
+        ),
+    ],
+)
+def test_replace_old_rounded_by_cast_does_not_match(
+    s: pl.Series, old: pl.Series
+) -> None:
+    # `old[0]` rounds to `s[0]` when cast to the dtype of `s`, but isn't equal to it
+    # (`==` would say it is for time units, as it casts both to the coarser unit).
+    assert_series_equal(s.replace(old, s.reverse()), s.gather([0, 0]))
+    assert_series_equal(s.replace(old[0], s[1]), s)
+    assert_series_equal(s.replace_strict(old, [10, 20], default=0), pl.Series([0, 20]))
+
+
+def test_replace_float_old_int_column_31194() -> None:
+    s = pl.Series("a", [1, 2, 3])
+    assert_series_equal(s.replace(2.5, 100), s)
+    assert_series_equal(s.replace(2.0, 100), pl.Series("a", [1, 100, 3]))
+    assert_series_equal(s.replace({2.0: 200, 2.5: 250}), pl.Series("a", [1, 200, 3]))
+    result = pl.DataFrame({"a": [2, 2]}).select(
+        pl.col("a").replace({2.0: 200, 2.5: 250})
+    )
+    assert_frame_equal(result, pl.DataFrame({"a": [200, 200]}))
+
+    # A float column still matches a value its cast rounds (`0.1` is its `0.1`).
+    f32 = pl.Series([0.1, 0.2], dtype=pl.Float32)
+    assert_series_equal(f32.replace(0.1, 9.0), pl.Series([9.0, 0.2], dtype=pl.Float32))
 
 
 def test_replace_duplicates_new() -> None:

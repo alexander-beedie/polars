@@ -669,6 +669,20 @@ def test_replace_strict_incompatible_types_26329() -> None:
         df.with_columns(pl.col("x").replace_strict({"a": 1}))
 
 
+# https://github.com/pola-rs/polars/issues/31194
+def test_replace_strict_float_old_int_column_31194() -> None:
+    s = pl.Series("a", [1, 2, 3])
+    assert_series_equal(
+        s.replace_strict({2.5: 100}, default=0), pl.Series("a", [0, 0, 0])
+    )
+    assert_series_equal(
+        s.replace_strict({1.0: 10, 2.0: 20, 3.0: 30, 2.5: 99}),
+        pl.Series("a", [10, 20, 30]),
+    )
+    with pytest.raises(InvalidOperationError, match="incomplete mapping"):
+        s.replace_strict({1.0: 10, 2.5: 20, 3.0: 30})
+
+
 def test_replace_strict_str_enum_27060() -> None:
     enum = pl.Enum(["A", "B"])
     out = pl.Series(["A", "B"]).cast(enum).replace_strict({"A": "X", "B": "Y"})

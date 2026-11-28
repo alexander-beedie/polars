@@ -182,8 +182,8 @@ fn execute_replacement(
         InvalidOperation: "`new` input for `replace` must have the same length as `old` or have length 1"
     );
     let (cast_old, kept) = cast_to_match(&old, s.dtype())?;
-    // Checked once cast, as a cast can make values equal (e.g. "1" and "1.0" as floats). A lookup
-    // can't, so then the values it dropped are checked as well.
+    // Checked once cast, as a cast can make values equal (e.g. "1" and "1.0" as floats). If values
+    // were dropped, the cast can't have made those kept equal, so the values given are checked.
     validate_old(if kept.is_some() { &old } else { &cast_old })?;
     let old = cast_old;
     let dtype = dtype.unwrap_or(new.dtype()).clone();
@@ -343,9 +343,10 @@ fn get_replacement_mask(s: &Series, old: &Series) -> PolarsResult<BooleanChunked
 
 /// Casts `values` to `dtype` to match them against values of that dtype.
 ///
-/// Casting strings (or the values of another Categorical or Enum) to a Categorical
-/// would add them to its categories, so they are looked up instead: a string without
-/// a category can't match, and is dropped. If any value was dropped, the mask of the
+/// A value the cast rounds (2.5 to an integer, a datetime to its date) has no equal of that dtype,
+/// so can't match, and is dropped. Casting strings (or the values of another Categorical or Enum)
+/// to a Categorical would add them to its categories, so they are looked up instead: a string
+/// without a category can't match, and is dropped too. If any value was dropped, the mask of the
 /// kept values is also returned.
 fn cast_to_match(
     values: &Series,
@@ -370,7 +371,24 @@ fn cast_to_match(
             return Ok((strings.filter(&kept)?.strict_cast(dtype)?, Some(kept)));
         }
     }
-    Ok((values.strict_cast(dtype)?, None))
+    let cast = values.strict_cast(dtype)?;
+    // Not to a float, as the closest float is the one meant (`0.1` is the `Float32` 0.1), and not
+    // a datetime to a time (its time of day), which can't be cast back.
+    use DataType as D;
+    let can_round = match (values.dtype(), dtype) {
+        (from, to) if from == to => false,
+        (from, to) if from.is_float() => to.is_integer() || to.is_decimal() || to.is_temporal(),
+        (from, to) if from.is_decimal() => to.is_integer() || to.is_decimal(),
+        (D::Datetime(..), D::Date | D::Datetime(..)) | (D::Duration(_), D::Duration(_)) => true,
+        _ => false,
+    };
+    if can_round {
+        let kept = cast.cast(values.dtype())?.equal_missing(values)?;
+        if !kept.all() {
+            return Ok((cast.filter(&kept)?, Some(kept)));
+        }
+    }
+    Ok((cast, None))
 }
 
 /// Ensure that all values were replaced, given that `matched` were: nulls need not be unless `old`
