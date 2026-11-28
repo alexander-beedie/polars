@@ -35,7 +35,6 @@ pub fn replace(s: &Series, old: &ListChunked, new: &ListChunked) -> PolarsResult
     if old.is_empty() {
         return Ok(s.clone());
     }
-    validate_old(&old)?;
 
     let dtype = s.dtype();
     execute_replacement(s, old, new, Some(dtype), CastOptions::Strict, Some(s))
@@ -57,25 +56,18 @@ pub fn replace_or_default(
         default.len() == s.len() || default.len() == 1,
         InvalidOperation: "`default` input for `replace_strict` must have the same length as the input or have length 1"
     );
-    validate_old(&old)?;
 
     let return_dtype = match return_dtype {
         Some(dtype) => dtype,
         None => try_get_supertype(new.dtype(), default.dtype())?,
     };
-    let default = default.cast(&return_dtype)?;
-
-    if old.is_empty() {
-        return default.broadcast_owned_to(s.len());
-    }
-
     execute_replacement(
         s,
         old,
         new,
         Some(&return_dtype),
         CastOptions::NonStrict,
-        Some(&default),
+        Some(default),
     )
 }
 
@@ -90,14 +82,10 @@ pub fn replace_strict(
 ) -> PolarsResult<Series> {
     let (old, new) = unpack_replacements("replace_strict", s, old, new, None)?;
 
-    if old.is_empty() {
-        polars_ensure!(
-            s.len() == s.null_count(),
-            InvalidOperation: "must specify which values to replace"
-        );
-        return Ok(s.clone());
-    }
-    validate_old(&old)?;
+    polars_ensure!(
+        !old.is_empty() || s.len() == s.null_count(),
+        InvalidOperation: "must specify which values to replace"
+    );
 
     // Extra check because strict_cast is too permissive, e.g. allows string -> struct cast.
     if old.dtype().can_cast_to(s.dtype()) != Some(true) {
@@ -143,6 +131,42 @@ fn unpack_replacements(
     Ok((old.explode(options)?, new.explode(options)?))
 }
 
+/// Validate a deferred cast without registering categories in its output mapping.
+fn deferred_cast_dtype(
+    values: &Series,
+    dtype: &DataType,
+    options: CastOptions,
+) -> PolarsResult<DataType> {
+    if dtype.is_categorical() && values.dtype().is_string() {
+        return Ok(dtype.clone());
+    }
+    #[cfg_attr(not(feature = "dtype-categorical"), allow(unused_mut))]
+    let mut swapped = Vec::<(DataType, DataType)>::new();
+    let validation_dtype = dtype
+        .clone()
+        .map_leaves_with(values.dtype(), &mut |_source, dt| {
+            #[cfg(feature = "dtype-categorical")]
+            if let DataType::Categorical(cats, _) = &dt
+                && _source != &dt
+            {
+                let own = DataType::from_categories(Categories::random(
+                    cats.namespace().clone(),
+                    CategoricalPhysical::U32,
+                ));
+                swapped.push((own.clone(), dt));
+                return own;
+            }
+            dt
+        });
+    let validated = values.cast_with_options(&validation_dtype, options)?;
+    Ok(validated.dtype().clone().map_leaves(&mut |dt| {
+        swapped
+            .iter()
+            .find(|(own, _)| own == &dt)
+            .map_or(dt, |(_, original)| original.clone())
+    }))
+}
+
 /// Replaces the values of `s` in `old` by the paired `new` values, cast to `dtype`
 /// (`new`'s own if `None`), and the others by `default`, raising if there is none.
 fn execute_replacement(
@@ -157,32 +181,43 @@ fn execute_replacement(
         new.len() == 1 || new.len() == old.len(),
         InvalidOperation: "`new` input for `replace` must have the same length as `old` or have length 1"
     );
-    let (old, kept) = cast_to_match(&old, s.dtype())?;
-    let dtype = dtype.unwrap_or(new.dtype());
-    let defer_cast = dtype.contains_categoricals() && new.dtype() != dtype;
-    let mut swapped: Vec<(DataType, DataType)> = Vec::new();
-    let validation_dtype = dtype.clone().map_leaves(&mut |dt| match dt {
-        #[cfg(feature = "dtype-categorical")]
-        DataType::Categorical(cats, mapping) if defer_cast => {
-            let own = Categories::random(cats.namespace().clone(), cats.physical());
-            let own = DataType::from_categories(own);
-            swapped.push((own.clone(), DataType::Categorical(cats, mapping)));
-            own
-        },
-        dt => dt,
-    });
-    // Any string casts to a Categorical, so then only the output dtype is resolved.
-    let validated = match dtype.is_categorical() && new.dtype().is_string() {
-        true => new
-            .clear()
-            .cast_with_options(&validation_dtype, cast_options)?,
-        false => new.cast_with_options(&validation_dtype, cast_options)?,
+    let (cast_old, kept) = cast_to_match(&old, s.dtype())?;
+    // Checked once cast, as a cast can make values equal (e.g. "1" and "1.0" as floats). A lookup
+    // can't, so then the values it dropped are checked as well.
+    validate_old(if kept.is_some() { &old } else { &cast_old })?;
+    let old = cast_old;
+    let dtype = dtype.unwrap_or(new.dtype()).clone();
+    let dtype = &dtype;
+    // A cast to a Categorical adds the values to its categories, so then only those used are cast.
+    let defer = |values: &Series| dtype.contains_categoricals() && values.dtype() != dtype;
+    let defer_cast = defer(&new);
+    let (mut new, resolved) = if defer_cast {
+        let resolved = deferred_cast_dtype(&new, dtype, cast_options)?;
+        (new, resolved)
+    } else {
+        let new = new.cast_with_options(dtype, cast_options)?;
+        let resolved = new.dtype().clone();
+        (new, resolved)
     };
-    let resolved = validated.dtype().clone().map_leaves(&mut |dt| {
-        let original = swapped.iter().find(|(own, _)| own == &dt);
-        original.map_or(dt, |(_, original)| original.clone())
-    });
-    let mut new = if defer_cast { new } else { validated };
+    // `default` is cast to `dtype` as `new` is, and the output dtype is the supertype of the two.
+    let defer_default = default.is_some_and(defer);
+    let default = match default {
+        Some(d) if !defer_default && d.dtype() != dtype => {
+            Some(d.cast_with_options(dtype, cast_options)?)
+        },
+        d => d.cloned(),
+    };
+    let out_dtype = match &default {
+        Some(d) if !defer_default => try_get_supertype(&resolved, d.dtype())?,
+        Some(d) if dtype.is_nested() || d.dtype().is_nested() => {
+            // An unused incompatible default is allowed, but a successful cast
+            // contributes its resolved type even when no row selects it.
+            let default_dtype =
+                deferred_cast_dtype(d, dtype, cast_options).unwrap_or_else(|_| resolved.clone());
+            try_get_supertype(&resolved, &default_dtype)?
+        },
+        _ => resolved.clone(),
+    };
     if let Some(kept) = kept.filter(|_| new.len() != 1) {
         new = new.filter(&kept)?;
     }
@@ -190,36 +225,69 @@ fn execute_replacement(
         false => Ok(new),
         true if used.iter().all(|&used| used) => new.cast_with_options(&resolved, cast_options),
         true => {
+            let filler = match used.iter().position(|&used| used) {
+                Some(i) if !new.dtype().is_nested() => new.new_from_index(i, 1),
+                _ => Series::full_null(PlSmallStr::EMPTY, 1, new.dtype()),
+            };
             let used = BooleanChunked::from_slice(PlSmallStr::EMPTY, used);
-            let nulls = Series::full_null(PlSmallStr::EMPTY, 1, new.dtype());
-            new.zip_with(&used, &nulls)?
+            new.zip_with(&used, &filler)?
                 .cast_with_options(&resolved, cast_options)
         },
+    };
+    // `default` for the values not `matched`, in the output dtype (if deferred, only those cast).
+    let cast_default = |default: &Series, matched: &BooleanChunked| {
+        if default.dtype() == &out_dtype {
+            Ok(default.clone())
+        } else if !defer_default {
+            default.cast(&out_dtype)
+        } else if matched.num_trues() == matched.len() {
+            Ok(Series::full_null(PlSmallStr::EMPTY, 1, &out_dtype))
+        } else {
+            let selected = if default.len() == 1 {
+                default.clone()
+            } else {
+                let nulls = Series::full_null(PlSmallStr::EMPTY, 1, default.dtype());
+                nulls.zip_with_same_type(matched, default)?
+            };
+            // Ignored rows may have prevented validation; resolve the selected
+            // values before combining their actual type with the inferred type.
+            let selected = selected.cast_with_options(dtype, cast_options)?;
+            let dtype = try_get_supertype(&out_dtype, selected.dtype())?;
+            if selected.dtype() == &dtype {
+                Ok(selected)
+            } else {
+                selected.cast(&dtype)
+            }
+        }
     };
 
     if old.is_empty() {
         // No `old` value has a category, so none can match.
-        return match default {
-            Some(default) => default
-                .cast(&try_get_supertype(&resolved, default.dtype())?)?
-                .broadcast_owned_to(s.len()),
-            None => {
-                ensure_all_replaced(s, &old, 0)?;
-                Ok(Series::full_null(s.name().clone(), s.len(), &resolved))
-            },
+        let Some(default) = default else {
+            ensure_all_replaced(s, &old, 0)?;
+            return Ok(Series::full_null(s.name().clone(), s.len(), &out_dtype));
         };
+        let matched = BooleanChunked::full(PlSmallStr::EMPTY, false, s.len());
+        return cast_default(&default, &matched)?.broadcast_owned_to(s.len());
     }
     if new.len() == 1 {
         let mask = get_replacement_mask(s, &old)?;
-        if default.is_none() {
-            ensure_all_replaced(s, &old, mask.num_trues())?;
-        }
-        let new = cast_used(new, &[mask.any()])?;
-        let nulls = Series::full_null(PlSmallStr::EMPTY, 1, new.dtype());
-        return new.zip_with(&mask, default.unwrap_or(&nulls));
+        let default = match &default {
+            Some(default) => cast_default(default, &mask)?,
+            None => {
+                ensure_all_replaced(s, &old, mask.num_trues())?;
+                Series::full_null(PlSmallStr::EMPTY, 1, &out_dtype)
+            },
+        };
+        return cast_used(new, &[mask.any()])?.zip_with(&mask, &default);
     }
 
     // The index of the `old` value each value of `s` equals, if any.
+    polars_ensure!(
+        old.dtype() == s.dtype(),
+        SchemaMismatch: "cannot replace values of type `{}` using keys of type `{}`",
+        s.dtype(), old.dtype()
+    );
     let (_, idx) = sort_or_hash_left(s, &old.rechunk(), false, JoinValidation::default(), true)?;
     #[cfg(feature = "chunked_ids")]
     let idx = idx.unwrap_left();
@@ -237,8 +305,12 @@ fn execute_replacement(
             ensure_all_replaced(s, &old, s.len() - missing)?;
         }
         let out = cast_used(new, &used)?.take(idx)?;
-        match default {
-            Some(default) if missing > 0 => out.zip_with(&idx.is_not_null(), default),
+        match &default {
+            Some(default) if missing > 0 => {
+                let matched = idx.is_not_null();
+                out.zip_with(&matched, &cast_default(default, &matched)?)
+            },
+            Some(_) if out.dtype() != &out_dtype => out.cast(&out_dtype),
             _ => Ok(out),
         }
     })
@@ -271,24 +343,31 @@ fn get_replacement_mask(s: &Series, old: &Series) -> PolarsResult<BooleanChunked
 
 /// Casts `values` to `dtype` to match them against values of that dtype.
 ///
-/// Casting strings to a Categorical would add them to its categories, so they are
-/// looked up instead: a string without a category can't match, and is dropped. If
-/// any value was dropped, the mask of the kept values is also returned.
+/// Casting strings (or the values of another Categorical or Enum) to a Categorical
+/// would add them to its categories, so they are looked up instead: a string without
+/// a category can't match, and is dropped. If any value was dropped, the mask of the
+/// kept values is also returned.
 fn cast_to_match(
     values: &Series,
     dtype: &DataType,
 ) -> PolarsResult<(Series, Option<BooleanChunked>)> {
     #[cfg(feature = "dtype-categorical")]
     if let DataType::Categorical(_, mapping) = dtype
-        && let Some(ca) = values.try_str()
+        && values.dtype() != dtype
+        && matches!(
+            values.dtype(),
+            DataType::String | DataType::Categorical(..) | DataType::Enum(..)
+        )
     {
-        let kept: BooleanChunked = ca
+        let strings = values.cast(&DataType::String)?;
+        let kept: BooleanChunked = strings
+            .str()?
             .iter()
             .map(|opt_s| opt_s.is_none_or(|s| mapping.get_cat(s).is_some()))
             .collect_ca_trusted(PlSmallStr::EMPTY);
         if !kept.all() {
             // Every string left has a category, so the cast adds none.
-            return Ok((values.filter(&kept)?.strict_cast(dtype)?, Some(kept)));
+            return Ok((strings.filter(&kept)?.strict_cast(dtype)?, Some(kept)));
         }
     }
     Ok((values.strict_cast(dtype)?, None))

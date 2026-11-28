@@ -81,6 +81,9 @@ def test_replace_categorical_absent_old_adds_no_categories(
     lf = pl.LazyFrame({"s": ["a", "b"]}, schema={"s": dtype})
     # A `new` value paired with an absent `old` value can't be output either.
     absent, unused, new = (f"{name}-{uuid4()}" for name in ("absent", "unused", "new"))
+    # Nor can one of another Categorical or an Enum.
+    enum_old = pl.Series([absent, "a"], dtype=pl.Enum([absent, "a"]))
+    cat_old = enum_old.cast(pl.Categorical(pl.Categories.random()))
     for expr, expected in [
         (pl.col("s").replace("a", new), [new, "b"]),
         (pl.col("s").replace(absent, "a"), ["a", "b"]),
@@ -89,6 +92,8 @@ def test_replace_categorical_absent_old_adds_no_categories(
         (pl.col("s").replace([absent, "a"], [unused, "b"]), ["b", "b"]),
         (pl.col("s").replace({absent: unused, "b": "a"}), ["a", "a"]),
         (pl.col("s").replace({absent: unused, f"{absent}-2": "a"}), ["a", "b"]),
+        (pl.col("s").replace(enum_old, [unused, "b"]), ["b", "b"]),
+        (pl.col("s").replace(cat_old, [unused, "b"]), ["b", "b"]),
     ]:
         result = lf.select(expr).collect(engine=engine)
         assert_frame_equal(result, pl.DataFrame({"s": expected}, schema={"s": dtype}))
@@ -136,6 +141,7 @@ def test_replace_enum_absent_old_raises(engine: EngineType) -> None:
         pl.col("s").replace("absent", "a"),
         pl.col("s").replace(["absent", "b"], "a"),
         pl.col("s").replace({"absent": "a", "b": "a"}),
+        pl.col("s").replace_strict({"absent": "x", "a": "y", "b": "z"}, default="d"),
     ]:
         with pytest.raises(
             InvalidOperationError, match="conversion from `str` to `enum` failed"
@@ -324,6 +330,7 @@ def test_replace_fast_path_many_to_one() -> None:
         ([2, 2], 100),
         ([2, 2], [100, 200]),
         ([2, 2], [100, 100]),
+        (["2", "02"], [100, 200]),
     ],
 )
 def test_replace_duplicates_old(old: list[int], new: int | list[int]) -> None:

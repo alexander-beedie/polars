@@ -125,45 +125,15 @@ pub fn index_of(series: &Series, needle: Scalar) -> PolarsResult<Option<usize>> 
             series.binary_offset()?,
             needle.value().extract_bytes().unwrap(),
         )),
-        DT::Array(_, _) | DT::List(_) | DT::Struct(_) => {
-            // For non-numeric dtypes, we convert to row-encoding, which essentially has
-            // us searching the physical representation of the data as a series of
-            // bytes.
-            let value_as_column = Column::new_scalar(PlSmallStr::EMPTY, needle, 1);
-            let value_as_row_encoded_ca = encode_rows_unordered(&[value_as_column])?;
-            let value = value_as_row_encoded_ca
+        dt if dt.is_nested() => {
+            let value = Column::new_scalar(PlSmallStr::EMPTY, needle, 1);
+            let value = encode_rows_unordered(&[value])?;
+            let value = value
                 .first()
-                .expect("Shouldn't have nulls in a row-encoded result");
-            let ca = encode_rows_unordered(&[series.clone().into_column()])?;
-            Ok(index_of_value::<_, BinaryArray<i64>>(&ca, value))
+                .expect("row encoding always produces one value");
+            let encoded = encode_rows_unordered(&[series.clone().into_column()])?;
+            Ok(index_of_value::<_, BinaryArray<i64>>(&encoded, value))
         },
-
-        DT::UInt8
-        | DT::UInt16
-        | DT::UInt32
-        | DT::UInt64
-        | DT::UInt128
-        | DT::Int8
-        | DT::Int16
-        | DT::Int32
-        | DT::Int64
-        | DT::Int128
-        | DT::Float16
-        | DT::Float32
-        | DT::Float64 => unreachable!("primitive numeric"),
-
-        // to_physical
-        #[cfg(feature = "dtype-map")]
-        DT::Map(..) => unreachable!(),
-        #[cfg(feature = "dtype-decimal")]
-        DT::Decimal(..) => unreachable!(),
-        #[cfg(feature = "dtype-categorical")]
-        DT::Categorical(..) | DT::Enum(..) => unreachable!(),
-        DT::Date | DT::Datetime(..) | DT::Duration(..) | DT::Time => unreachable!(),
-
-        #[cfg(feature = "object")]
-        DT::Object(_) => polars_bail!(op = "index_of", series.dtype()),
-
-        DT::Unknown(_) => polars_bail!(op = "index_of", series.dtype()),
+        _ => polars_bail!(op = "index_of", series.dtype()),
     }
 }

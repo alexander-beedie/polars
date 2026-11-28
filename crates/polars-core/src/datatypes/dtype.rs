@@ -471,27 +471,75 @@ impl DataType {
         }
     }
 
-    /// Map all leaf types of nested dtypes (list, array, struct) using the
-    /// supplied function.
+    /// Map all leaf types of nested dtypes using the supplied function.
     pub fn map_leaves<F: FnMut(DataType) -> DataType>(self, f: &mut F) -> DataType {
+        self.map_leaves_with(&DataType::Null, &mut |_, dt| f(dt))
+    }
+
+    /// Map leaf types, pairing them with the corresponding types in
+    /// `other`. Struct fields are paired by name, and Map/Extension storage is
+    /// used when the other type has a different representation.
+    pub fn map_leaves_with<F: FnMut(&DataType, DataType) -> DataType>(
+        self,
+        other: &DataType,
+        f: &mut F,
+    ) -> DataType {
         use DataType::*;
+        #[cfg(feature = "dtype-extension")]
+        if let Extension(_, storage) = other {
+            return self.map_leaves_with(storage, f);
+        }
+        #[cfg(feature = "dtype-map")]
+        let other_storage = other.map_storage_dtype();
+        #[cfg(feature = "dtype-map")]
+        let other = other_storage.as_ref().unwrap_or(other);
         match self {
-            List(inner) => List(Box::new(inner.map_leaves(f))),
+            List(inner) => List(Box::new(
+                inner.map_leaves_with(other.inner_dtype().unwrap_or(&Null), f),
+            )),
             #[cfg(feature = "dtype-array")]
-            Array(inner, size) => Array(Box::new(inner.map_leaves(f)), size),
+            Array(inner, size) => Array(
+                Box::new(inner.map_leaves_with(other.inner_dtype().unwrap_or(&Null), f)),
+                size,
+            ),
             #[cfg(feature = "dtype-struct")]
-            Struct(fields) => {
-                let new_fields = fields
+            Struct(fields) => Struct(
+                fields
                     .into_iter()
-                    .map(|fld| Field::new(fld.name, fld.dtype.map_leaves(f)))
-                    .collect();
-                Struct(new_fields)
-            },
+                    .enumerate()
+                    .map(|(i, field)| {
+                        let counterpart = match other {
+                            Struct(fields) => fields
+                                .get(i)
+                                .filter(|f| f.name == field.name)
+                                .or_else(|| fields.iter().find(|f| f.name == field.name))
+                                .map(|f| &f.dtype),
+                            _ => None,
+                        };
+                        Field::new(
+                            field.name,
+                            field.dtype.map_leaves_with(counterpart.unwrap_or(&Null), f),
+                        )
+                    })
+                    .collect(),
+            ),
             #[cfg(feature = "dtype-map")]
-            Map(key, value) => Map(Box::new(key.map_leaves(f)), Box::new(value.map_leaves(f))),
+            Map(key, value) => {
+                let counterpart = other
+                    .inner_dtype()
+                    .and_then(|entries| entries.map_from_named_entries_dtype().ok());
+                let (other_key, other_value) = counterpart
+                    .as_ref()
+                    .and_then(DataType::as_map)
+                    .unwrap_or((&Null, &Null));
+                Map(
+                    Box::new(key.map_leaves_with(other_key, f)),
+                    Box::new(value.map_leaves_with(other_value, f)),
+                )
+            },
             #[cfg(feature = "dtype-extension")]
-            Extension(ext, storage) => Extension(ext, Box::new(storage.map_leaves(f))),
-            _ => f(self),
+            Extension(ext, storage) => Extension(ext, Box::new(storage.map_leaves_with(other, f))),
+            dt => f(other, dt),
         }
     }
 
